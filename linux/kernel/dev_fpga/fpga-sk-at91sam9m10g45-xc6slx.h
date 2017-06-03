@@ -3,6 +3,8 @@
 
 // TODO: I don't think we need so many includes
 
+#ifdef __KERNEL__
+
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/interrupt.h>
@@ -80,6 +82,10 @@ static int sk_fpga_probe  (struct platform_device *pdev);
 
 // setup clk for fpga
 int sk_fpga_start_clk(struct platform_device *pdev);
+
+#endif //end of kernel-specific stuff
+
+//this part is available to user space apps
 
 #define SKFP_IOC_MAGIC 0x81
 
