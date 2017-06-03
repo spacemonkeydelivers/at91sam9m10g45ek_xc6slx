@@ -16,9 +16,26 @@ with at91sam9m10g45ek in even more weird and obscure way.
 
 [The hall of... fame](https://www.linux.org.ru/forum/development/11922230)
 
+## Environment
+
+You should have a copy of linux kernel somewhere. To do any kernel or
+userspace development you should setup your environment first.
+`./scripts/prepar_env.sh`
+will take care of this task:
+```
+./scripts/prepair_env.sh <PATH_TO_LINUX_KERNEL>
+#this will create all the necessary symlinks
+```
+
 ## The driver (which leaks)
 
-TODO.
+To build the driver/kernel image one should use the following commands:
+
+```
+CROSS_COMPILE=<YOUR_TOOLCHAIN_PREFIX> ARCH=arm make sk_at91_xc6slx_dt_defconfig
+CROSS_COMPILE=<YOUR_TOOLCHAIN_PREFIX> ARCH=arm LOADADDR=70008000 make uImage
+#toolchain prefix may look like: "arm-at91-linux-gnueabi-" or something like that
+```
 
 ## The program (which crashes)
 
