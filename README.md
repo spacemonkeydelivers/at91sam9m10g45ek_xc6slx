@@ -39,7 +39,11 @@ CROSS_COMPILE=<YOUR_TOOLCHAIN_PREFIX> ARCH=arm LOADADDR=70008000 make uImage
 
 ## The program (which crashes)
 
-TODO.
+To build the program your compiler should be aware of the kernel's sources location :
+
+```
+    gcc -isystem <PATH_TO_DIRECTORY_WITH_SOURCES> -march arm ...
+```
 
 ## The HW (mailfunctioned)
 
