@@ -73,7 +73,6 @@ int main (int argc, char* argv[])
         perror("ioctl (set mode)");
         goto cleanup;
     }
-    result = 0;
 
     mmap_area = mmap(0, window_size, PROT_WRITE|PROT_READ, MAP_SHARED, fd, 0);
     if (mmap_area == MAP_FAILED) {
@@ -87,6 +86,8 @@ int main (int argc, char* argv[])
         *ptr = (uint8_t)i;
     }
     printf("%d bytes were written", window_size);
+
+    result = 0;
 
 cleanup:
 
