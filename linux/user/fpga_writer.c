@@ -72,26 +72,35 @@ struct program_opt parse_opts(int argc, char* argv[])
 
 void write_byte_sequence(volatile uint8_t* const ptr, int bytes_num)
 {
+    if (!bytes_num)
+        return;
+
     int i = 0;
     for (i = 0; i < bytes_num; ++i) {
-        volatile uint8_t* p = ptr + i;
-        *p = (uint8_t)i;
+        ptr[i] = (uint8_t)i;
     }
 }
 void write_int_sequence(volatile uint32_t* const ptr, int bytes_num)
 {
+    if (!bytes_num)
+        return;
+
+    uintptr_t PTR_VAL = (uintptr_t)ptr;
+    if (!(PTR_VAL & 0b11))
+    {
+        volatile uint8_t* byte_ptr = (volatile uint8_t*)ptr;
+        *byte_ptr = 0xf0 | (PTR_VAL & 0xf);
+        //inefficient, but should work
+        write_int_sequence((volatile uint32_t*)(byte_ptr + 1), bytes_num - 1);
+        return;
+    }
     const int inum = bytes_num / 4;
     int i = 0;
     for (i = 0; i < inum; ++i) {
-        volatile uint32_t* p = ptr + i;
-        *p = (uint32_t)i;
+        ptr[i] = (uint32_t)i;
     }
-    //write remaining bytes
-    const int brem = bytes_num % 4;
-    for (i = 0; i < brem; ++i) {
-        volatile uint8_t* p = ((volatile uint8_t*)(ptr + inum)) + i;
-        *p = (uint8_t)i;
-    }
+
+    write_byte_sequence((volatile uint8_t*)(ptr + inum), bytes_num % 4);
 }
 int main (int argc, char* argv[])
 {
