@@ -9,7 +9,7 @@ static int sk_fpga_mmap(struct file *file, struct vm_area_struct * vma)
 	unsigned long len        = fpga.fpga_mem_window_size;
 	unsigned long mmio_pgoff = PAGE_ALIGN((start & ~PAGE_MASK) + len) >> PAGE_SHIFT;
 
-    int result = 0;
+    int err = 0;
 
 	if (vma->vm_pgoff >= mmio_pgoff) {
 		vma->vm_pgoff -= mmio_pgoff;
@@ -18,11 +18,12 @@ static int sk_fpga_mmap(struct file *file, struct vm_area_struct * vma)
 	vma->vm_page_prot = vm_get_page_prot(vma->vm_flags);
 
     //io_remap_pfn_range call...
-	result = vm_iomap_memory(vma, start, len);
-    if (!result) {
+    err = vm_iomap_memory(vma, start, len);
+    if (err) {
         printk(KERN_ALERT"fpga mmap failed :(\n");
+        return err;
     }
-    return result;
+    return 0;
 }
 
 static long sk_fpga_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
