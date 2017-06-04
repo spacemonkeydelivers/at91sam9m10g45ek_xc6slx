@@ -12,45 +12,103 @@
 #include <stdio.h>
 #include <stdint.h>
 
+typedef struct program_opt
+{
+    int mmap_mode;
+    int byte_granularity;
 
+    int valid;
+} program_opt;
+
+struct program_opt parse_opts(int argc, char* argv[])
+{
+    program_opt result;
+
+    result.mmap_mode        = SKFP_MMAP_MODE_DEFAULT;
+    result.byte_granularity = 1;
+    result.valid            = 1;
+
+    int i = 0;
+    for (i = 2; i < argc; ++i) {
+
+        if (strcmp(argv[i], "--int") == 0) {
+            result.byte_granularity = 0;
+        }
+        if (strcmp(argv[i], "--byte") == 0) {
+            result.byte_granularity = 1;
+        }
+        if (strcmp(argv[i], "--attrs") == 0) {
+
+            int a_idx = i + 1;
+
+            if (a_idx >= argc) {
+                fprintf(stderr, "%s", "invalid number of arguments!\n");
+                result.valid = -1;
+                return result;
+            }
+            const char* attr = argv[a_idx];
+
+            if (strcmp(attr, "WB") == 0)
+                result.mmap_mode = SKFP_MMAP_MODE_WB;
+            else if (strcmp(attr, "WC") == 0)
+                result.mmap_mode = SKFP_MMAP_MODE_WC;
+            else if (strcmp(attr, "WT") == 0)
+                result.mmap_mode = SKFP_MMAP_MODE_WT;
+            else if (strcmp(attr, "DEFAULT") == 0)
+                result.mmap_mode = SKFP_MMAP_MODE_DEFAULT;
+            else
+                result.valid = -1;
+
+            if (result.valid <= 0) {
+                fprintf(stderr, "invalid --attr argument: \"%s\"\n", attr);
+                return result;
+            }
+
+            i = a_idx;
+        }
+    }
+    return result;
+}
+
+void write_byte_sequence(volatile uint8_t* const ptr, int bytes_num)
+{
+    int i = 0;
+    for (i = 0; i < bytes_num; ++i) {
+        volatile uint8_t* p = ptr + i;
+        *p = (uint8_t)i;
+    }
+}
+void write_int_sequence(volatile uint32_t* const ptr, int bytes_num)
+{
+    const int inum = bytes_num / 4;
+    int i = 0;
+    for (i = 0; i < inum; ++i) {
+        volatile uint32_t* p = ptr + i;
+        *p = (uint32_t)i;
+    }
+    //write remaining bytes
+    const int brem = bytes_num % 4;
+    for (i = 0; i < brem; ++i) {
+        volatile uint8_t* p = ((volatile uint8_t*)(ptr + inum)) + i;
+        *p = (uint8_t)i;
+    }
+}
 int main (int argc, char* argv[])
 {
 	if (argc < 2) {
 		printf("%s",
-               "usage:\nfpga_loader <filename> [--attrs attr]\n"
+               "usage:\nfpga_loader <filename> [--attrs attr] [--byte] [--int]\n"
                "    attr can be one of WB,WC,WT,DEFAULT\n");
         return 0;
     }
-    int MMAP_MODE = SKFP_MMAP_MODE_DEFAULT;
 
-    for (int i = 2; i < argc; ++i) {
-
-         if (strcmp(argv[i], "--attrs") == 0)                                                                                 {                                                                                                                          
-
-             int a_idx = i + 1;
-
-             if (a_idx >= argc) {
-                 fprintf(stderr, "%s", "invalid number of erguments!\n");
-                 return -1;
-             }
-             const char* attr = argv[a_idx];
-
-             if (strcmp(attr, "WB") == 0)
-                 MMAP_MODE = SKFP_MMAP_MODE_WB;
-             else if (strcmp(attr, "WC") == 0)
-                 MMAP_MODE = SKFP_MMAP_MODE_WC;
-             else if (strcmp(attr, "WT") == 0)
-                 MMAP_MODE = SKFP_MMAP_MODE_WT;
-             else if (strcmp(attr, "DEFAULT") == 0)
-                 MMAP_MODE = SKFP_MMAP_MODE_DEFAULT;
-
-             i = a_idx;
-         }                                                                                                                          
-    }
+    program_opt opts = parse_opts(argc, argv);
+    if (opts.valid <= 0)
+        return -1;
 
     int result       = -1;
     int window_size  = 0;
-    void * mmap_area = 0;
+    volatile void* mmap_area = 0;
 
     const char* filename = argv[1];
 
@@ -69,7 +127,7 @@ int main (int argc, char* argv[])
     }
     printf("resulting buffer size: 0x%x\n", window_size);
 
-    if (ioctl(fd, SKFP_IOCSCMODE, &MMAP_MODE) == -1) {
+    if (ioctl(fd, SKFP_IOCSCMODE, &opts.mmap_mode) == -1) {
         perror("ioctl (set mode)");
         goto cleanup;
     }
@@ -80,19 +138,22 @@ int main (int argc, char* argv[])
         goto cleanup;
     }
 
-    for (int i = 0; i < window_size; ++i)
-    {
-        uint8_t* ptr = (uint8_t*)mmap_area + i;
-        *ptr = (uint8_t)i;
+    if (opts.byte_granularity) {
+        printf("writing data using byte access...\n");
+        write_byte_sequence(mmap_area, window_size);
     }
-    printf("%d bytes were written", window_size);
+    else {
+        printf("writing data using 32-bit access...\n");
+        write_int_sequence(mmap_area, window_size);
+    }
+    printf("%d bytes were written\n", window_size);
 
     result = 0;
 
 cleanup:
 
     if (mmap_area && (mmap_area != MAP_FAILED)) {
-        munmap(mmap_area, window_size);
+        munmap((void*)mmap_area, window_size);
         mmap_area = 0;
     }
 
