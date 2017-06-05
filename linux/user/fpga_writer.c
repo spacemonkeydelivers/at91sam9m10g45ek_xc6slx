@@ -86,7 +86,7 @@ void write_int_sequence(volatile uint32_t* const ptr, int bytes_num)
         return;
 
     uintptr_t PTR_VAL = (uintptr_t)ptr;
-    if (!(PTR_VAL & 0b11))
+    if (PTR_VAL & 0b11) //this means that address is not 4-byte aligined
     {
         volatile uint8_t* byte_ptr = (volatile uint8_t*)ptr;
         *byte_ptr = 0xf0 | (PTR_VAL & 0xf);
@@ -105,7 +105,7 @@ void write_int_sequence(volatile uint32_t* const ptr, int bytes_num)
 int main (int argc, char* argv[])
 {
 	if (argc < 2) {
-		printf("%s",
+	printf("%s",
                "usage:\nfpga_loader <filename> [--attrs attr] [--byte] [--int]\n"
                "    attr can be one of WB,WC,WT,DEFAULT\n");
         return 0;
