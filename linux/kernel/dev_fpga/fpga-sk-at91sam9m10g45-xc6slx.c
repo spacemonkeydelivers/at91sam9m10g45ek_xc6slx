@@ -5,17 +5,17 @@ struct sk_fpga fpga;
 static int sk_fpga_mmap(struct file *file, struct vm_area_struct * vma)
 {
     //NOTE: we should really protect these by mutexes and stuff...
-	unsigned long start      = fpga.fpga_mem_phys_start;
-	unsigned long len        = fpga.fpga_mem_window_size;
-	unsigned long mmio_pgoff = PAGE_ALIGN((start & ~PAGE_MASK) + len) >> PAGE_SHIFT;
+    unsigned long start      = fpga.fpga_mem_phys_start;
+    unsigned long len        = fpga.fpga_mem_window_size;
+    unsigned long mmio_pgoff = PAGE_ALIGN((start & ~PAGE_MASK) + len) >> PAGE_SHIFT;
 
     int err = 0;
 
-	if (vma->vm_pgoff >= mmio_pgoff) {
-		vma->vm_pgoff -= mmio_pgoff;
-	}
+    if (vma->vm_pgoff >= mmio_pgoff) {
+        vma->vm_pgoff -= mmio_pgoff;
+    }
 
-	vma->vm_page_prot = vm_get_page_prot(vma->vm_flags);
+    vma->vm_page_prot = vm_get_page_prot(vma->vm_flags);
 
     //io_remap_pfn_range call...
     err = vm_iomap_memory(vma, start, len);
@@ -23,7 +23,7 @@ static int sk_fpga_mmap(struct file *file, struct vm_area_struct * vma)
         printk(KERN_ALERT"fpga mmap failed :(\n");
         return err;
     }
-    return 0;
+    return err;
 }
 
 static long sk_fpga_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
@@ -51,6 +51,31 @@ static long sk_fpga_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
         }
         fpga.mmap_mode = requested_mode;
         break;
+    case SKFP_IOCSSMCSET:
+        struct sk_fpga_smc_timings timings;
+        if (getuser(timings, (int __user *)arg) == -EFAULT)
+            return -EFAULT;
+        fpga.smc_timings.setup = timings.setup;
+        fpga.smc_timings.pulse = timings.pulse;
+        fpga.smc_timings.cycle = timings.cycle;
+        fpga.smc_timings.mode  = timings.mode;
+        if (!sk_fpga_setup_smc())
+            return -EFAULT;
+        break;
+    case SKFP_IOCSFREQ:
+        unsigned freq = 0;
+        if (getuser(freq, (int __user *)arg) == -EFAULT)
+            return -EFAULT;
+        fpga.fpga_frequency = freq;
+        ret = clk_set_rate(fpga.fpga_clk, fpga.fpga_frequency);
+        if (ret)
+        {
+            return -EFAULT;
+        }
+        break;
+    case SKFP_IOCQFREQ:
+        if (put_user(clk_get_rate(fpga.fpga_clk), (int __user *)arg) == -EFAULT)
+            return -EFAULT;
     default:
         return -ENOTTY;
     }
@@ -59,6 +84,14 @@ static long sk_fpga_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 static int sk_fpga_open(struct inode *inode, struct file *file)
 {
     unsigned long remap_flags = 0;
+    if (fpga.fpga_opened)
+    {
+        return -EBUSY;
+    }
+    else
+    {
+        fpga.fpga_opened += 1;
+    }
     if (!request_mem_region(fpga.fpga_mem_phys_start,
                             fpga.fpga_mem_window_size,
                             "sk_fpga_memory"))
@@ -74,8 +107,7 @@ static int sk_fpga_open(struct inode *inode, struct file *file)
         if (!fpga.fpga_mem_virt_start)
         {
             printk(KERN_ERR"Failed to ioremap mem region\n");
-            //TODO: we have a memory leak here...
-            return -EBUSY;
+            goto cancel;
         }
         break;
     case SKFP_MMAP_MODE_WB:
@@ -92,15 +124,17 @@ static int sk_fpga_open(struct inode *inode, struct file *file)
                                             remap_flags);
         if (!fpga.fpga_mem_virt_start)
         {
-            printk(KERN_ERR"Failed to memremap map region... falgs = %ld\n", remap_flags);
-            //TODO: we have a memory leak here too...
-            return -EBUSY;
+            printk(KERN_ERR"Failed to memremap map region: flags = %ld\n", remap_flags);
+            goto cancel;
         }
         break;
     default:
         return -EINVAL;
     }
     return 0;
+cancel:
+    release_mem_region(fpga.fpga_mem_phys_start, fpga.fpga_mem_window_size);
+    return -EBUSY;
 }
 
 static int sk_fpga_close(struct inode *inodep, struct file *filp)
@@ -109,12 +143,16 @@ static int sk_fpga_close(struct inode *inodep, struct file *filp)
     {
         iounmap(fpga.fpga_mem_virt_start);
     }
+    if (fpga.fpga_opened)
+    {
+        fpga.fpga_opened -= 1;
+    }
     release_mem_region(fpga.fpga_mem_phys_start, fpga.fpga_mem_window_size);
     return 0;
 }
 
 static ssize_t sk_fpga_write(struct file *file, const char __user *buf,
-		             size_t len, loff_t *ppos)
+                    size_t len, loff_t *ppos)
 {
     uint16_t data = 0;
     uint16_t res = copy_from_user(&data, buf, sizeof(uint16_t));
@@ -124,7 +162,7 @@ static ssize_t sk_fpga_write(struct file *file, const char __user *buf,
 }
 
 static ssize_t sk_fpga_read(struct file *file, char __user *buf,
-		            size_t len, loff_t *ppos)
+                    size_t len, loff_t *ppos)
 {
     uint16_t data = readw(fpga.fpga_mem_virt_start);
     uint16_t res = 0;
@@ -135,11 +173,11 @@ static ssize_t sk_fpga_read(struct file *file, char __user *buf,
 
 static const struct file_operations fpga_fops = {
         .owner          = THIS_MODULE,
-        .write			= sk_fpga_write,
-        .read			= sk_fpga_read,
-        .open			= sk_fpga_open,
+        .write          = sk_fpga_write,
+        .read           = sk_fpga_read,
+        .open           = sk_fpga_open,
         .unlocked_ioctl = sk_fpga_ioctl,
-        .release		= sk_fpga_close,
+        .release        = sk_fpga_close,
         .mmap           = sk_fpga_mmap
 };
 
@@ -149,8 +187,6 @@ static struct miscdevice sk_fpga_dev = {
         &fpga_fops
 };
 
-
-//TODO: remove magic numbers
 int sk_fpga_setup_smc(void)
 {
     int ret = -EIO;
@@ -166,10 +202,11 @@ int sk_fpga_setup_smc(void)
         printk(KERN_ERR"Failed to request mem region for smd\n");
         return ret;
     }
-    smc = ioremap(SMC_ADDRESS, 0xff);
+    smc = ioremap(SMC_ADDRESS, SMC_ADDRESS_WINDOW);
     if (!smc)
     {
         printk(KERN_ERR"Failed to ioremap mem region for smd\n");
+        release_mem_region(SMC_ADDRESS, SMC_ADDRESS_WINDOW);
         return ret;
     }
 
@@ -178,14 +215,13 @@ int sk_fpga_setup_smc(void)
     ADDR_CYCLE = smc + 2;
     ADDR_MODE  = smc + 3;
 
-    iowrite32(SMC_SETUP_DATA,ADDR_SETUP );
-    iowrite32(SMC_PULSE_DATA, ADDR_PULSE);
-    iowrite32(SMC_CYCLE_DATA, ADDR_CYCLE);
-    iowrite32(SMC_MODE_DATA, ADDR_MODE);
+    iowrite32(fpga.smc_timings.setup, ADDR_SETUP);
+    iowrite32(fpga.smc_timings.pulse, ADDR_PULSE);
+    iowrite32(fpga.smc_timings.cycle, ADDR_CYCLE);
+    iowrite32(fpga.smc_timings.mode, ADDR_MODE);
  
     iounmap(smc);
     release_mem_region(SMC_ADDRESS, SMC_ADDRESS_WINDOW);
-    
     return 0;    
 }
 
@@ -251,6 +287,46 @@ int sk_fpga_fill_structure(struct platform_device *pdev)
         return -ENOMEM;
     }
 
+    // get fpga frequency
+    ret = of_property_read_u32(pdev->dev.of_node, "fpga-frequency", &fpga.fpga_frequency);
+    if (ret != 0)
+    {
+        printk("Failed to obtain fpga frequency from dtb\n");
+        return -ENOMEM;
+    }
+
+    // get fpga smc setup
+    ret = of_property_read_u32(pdev->dev.of_node, "fpga-smc-setup", &fpga.smc_timings.setup);
+    if (ret != 0)
+    {
+        printk("Failed to obtain fpga smc timings for setup from dtb\n");
+        return -ENOMEM;
+    }
+
+    // get fpga smc pulse
+    ret = of_property_read_u32(pdev->dev.of_node, "fpga-smc-pulse", &fpga.smc_timings.pulse);
+    if (ret != 0)
+    {
+        printk("Failed to obtain fpga smc timings for pulse from dtb\n");
+        return -ENOMEM;
+    }
+
+    // get fpga smc cycle
+    ret = of_property_read_u32(pdev->dev.of_node, "fpga-smc-cycle", &fpga.smc_timings.cycle);
+    if (ret != 0)
+    {
+        printk("Failed to obtain fpga smc timings for cycle from dtb\n");
+        return -ENOMEM;
+    }
+
+    // get fpga smc mode
+    ret = of_property_read_u32(pdev->dev.of_node, "fpga-smc-mode", &fpga.smc_timings.mode);
+    if (ret != 0)
+    {
+        printk("Failed to obtain fpga smc timings for mode from dtb\n");
+        return -ENOMEM;
+    }
+
     fpga.fpga_irq_num = -1;
     fpga.fpga_mem_virt_start = NULL;
     init_waitqueue_head(&fpga.fpga_wait_queue);
@@ -293,10 +369,10 @@ static int sk_fpga_probe (struct platform_device *pdev)
     }
 
     // run fpga clocking source
-    ret = clk_set_rate(fpga.fpga_clk, SK_133MHZ_CLOCK_RATE);
+    ret = clk_set_rate(fpga.fpga_clk, fpga.fpga_frequency);
     if (ret) 
     {
-        dev_err(&pdev->dev, "Could not set fpga clk rate as %d\n", SK_133MHZ_CLOCK_RATE);
+        dev_err(&pdev->dev, "Could not set fpga clk rate as %d\n", fpga.fpga_frequency);
         return ret;
     }
     printk(KERN_ERR"Current clk rate: %ld\n", clk_get_rate(fpga.fpga_clk));

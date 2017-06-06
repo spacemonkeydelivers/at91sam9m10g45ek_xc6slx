@@ -56,7 +56,13 @@
 #define SMC_DELAY7 0xD8
 #define SMC_DELAY8 0xDC
 
-#define SK_133MHZ_CLOCK_RATE 133333333
+struct sk_fpga_smc_timings
+{
+    uint32_t setup;
+    uint32_t pulse;
+    uint32_t cycle;
+    uint32_t mode;
+};
 
 struct sk_fpga
 {
@@ -70,11 +76,13 @@ struct sk_fpga
     uint8_t fpga_din;                 // pin to set data to fpga
     uint8_t fpga_done;                // pin to read status done from fpga
     uint8_t fpga_prog;                // pin to set mode to prog on fpga
-    wait_queue_head_t fpga_wait_queue;
+    wait_queue_head_t fpga_wait_queue;// queue for external interrupt
     int32_t fpga_irq_num;             // where to store assigned interrupt
     struct clk* fpga_clk;             // clock source for fpga
-    //note: we should add a lock/counter here...
-    uint8_t mmap_mode;
+    uint8_t fpga_opened;              // fpga opened times
+    uint8_t mmap_mode;                // mmap mode for fpga
+    struct sk_fpga_smc_timings smc_timings;
+    uint32_t fpga_frequency;          // frequency for fpga
 };
 
 static int sk_fpga_remove (struct platform_device *pdev);
@@ -93,6 +101,9 @@ int sk_fpga_start_clk(struct platform_device *pdev);
 #define SKFP_IOCQSIZE  _IOR(SKFP_IOC_MAGIC, 1, int)
 #define SKFP_IOCQCMODE _IOR(SKFP_IOC_MAGIC, 2, int)
 #define SKFP_IOCSCMODE _IOW(SKFP_IOC_MAGIC, 3, int)
+#define SKFP_IOCSSMCSET _IOW(SKFP_IOC_MAGIC, 4, struct sk_fpga_smc_timings)
+#define SKFP_IOCSFREQ   _IOW(SKFP_IOC_MAGIC, 5, unsigned)
+#define SKFP_IOCQFREQ   _IOW(SKFP_IOC_MAGIC, 6, unsigned)
 
 #define SKFP_MMAP_MODE_DEFAULT 0
 #define SKFP_MMAP_MODE_WB      1

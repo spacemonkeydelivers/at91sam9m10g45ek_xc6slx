@@ -306,6 +306,11 @@
 			clock-names = "mclk";
 			fpga-memory-window-size = <0x2000000>;
 			fpga-memory-start-address = <0x10000000>;
+			fpga-frequency = <133333333>;
+			fpga-smc-setup = <0x01010101>;
+			fpga-smc-pulse = <0x0a0a0a0a>;
+			fpga-smc-cycle = <0x000e000e>;
+			fpga-smc-mode  = <0x00001003>;
 			pinctrl-names = "default";
 			pinctrl-0 = <
 				&pinctrl_pck0_as_fpga_clock

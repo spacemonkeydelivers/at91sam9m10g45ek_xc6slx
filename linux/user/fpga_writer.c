@@ -80,6 +80,7 @@ void write_byte_sequence(volatile uint8_t* const ptr, int bytes_num)
         ptr[i] = (uint8_t)i;
     }
 }
+
 void write_int_sequence(volatile uint32_t* const ptr, int bytes_num)
 {
     if (!bytes_num)
@@ -102,10 +103,11 @@ void write_int_sequence(volatile uint32_t* const ptr, int bytes_num)
 
     write_byte_sequence((volatile uint8_t*)(ptr + inum), bytes_num % 4);
 }
+
 int main (int argc, char* argv[])
 {
-	if (argc < 2) {
-	printf("%s",
+    if (argc < 2) {
+        printf("%s",
                "usage:\nfpga_loader <filename> [--attrs attr] [--byte] [--int]\n"
                "    attr can be one of WB,WC,WT,DEFAULT\n");
         return 0;
