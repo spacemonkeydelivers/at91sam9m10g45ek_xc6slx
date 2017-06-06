@@ -23,7 +23,7 @@ static int sk_fpga_mmap(struct file *file, struct vm_area_struct * vma)
         printk(KERN_ALERT"fpga mmap failed :(\n");
         return err;
     }
-    return err;
+    return 0;
 }
 
 static long sk_fpga_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
