@@ -81,6 +81,21 @@ void write_byte_sequence(volatile uint8_t* const ptr, int bytes_num)
     }
 }
 
+int set_smc_timings(struct sk_fpga_smc_timings* timings)
+{
+    return (ioctl(fd, SKFP_IOCSSMCSET, timings) == -1)
+}
+
+int set_fpga_frequency(unsigned freq)
+{
+    return (ioctl(fd, SKFP_IOCSFREQ, &freq) == -1)
+}
+
+int get_fpga_frequency(unsigned* freq)
+{
+    return (ioctl(fd, SKFP_IOCQFREQ, freq) == -1)
+}
+
 void write_int_sequence(volatile uint32_t* const ptr, int bytes_num)
 {
     if (!bytes_num)
