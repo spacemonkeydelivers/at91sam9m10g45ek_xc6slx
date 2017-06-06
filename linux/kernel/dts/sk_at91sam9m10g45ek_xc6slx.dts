@@ -304,7 +304,7 @@
 			compatible = "sk,at91-xc6slx";
 			clocks = <&pck0>;
 			clock-names = "mclk";
-			fpga-memory-window-size = <0x20000000>;
+			fpga-memory-window-size = <0x2000000>;
 			fpga-memory-start-address = <0x10000000>;
 			pinctrl-names = "default";
 			pinctrl-0 = <
