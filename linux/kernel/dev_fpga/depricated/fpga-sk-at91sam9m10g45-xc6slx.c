@@ -2,8 +2,183 @@
 
 struct sk_fpga fpga;
 
+static int sk_fpga_mmap(struct file *file, struct vm_area_struct * vma)
+{
+    //NOTE: we should really protect these by mutexes and stuff...
+    unsigned long start      = fpga.fpga_mem_phys_start;
+    unsigned long len        = fpga.fpga_mem_window_size;
+    unsigned long mmio_pgoff = PAGE_ALIGN((start & ~PAGE_MASK) + len) >> PAGE_SHIFT;
+
+    int err = 0;
+
+    if (vma->vm_pgoff >= mmio_pgoff) {
+        vma->vm_pgoff -= mmio_pgoff;
+    }
+
+    vma->vm_page_prot = vm_get_page_prot(vma->vm_flags);
+
+    //io_remap_pfn_range call...
+    err = vm_iomap_memory(vma, start, len);
+    if (err) {
+        printk(KERN_ALERT"fpga mmap failed :(\n");
+        return err;
+    }
+    return 0;
+}
+
+static long sk_fpga_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
+{
+    int requested_mode = -1;
+    switch (cmd)
+    {
+    case SKFP_IOCQSIZE:
+        if (put_user(fpga.fpga_mem_window_size, (int __user *)arg) == -EFAULT)
+            return -EFAULT;
+        break;
+    case SKFP_IOCQCMODE:
+        if (put_user(fpga.mmap_mode, (int __user *)arg) == -EFAULT)
+            return -EFAULT;
+        break;
+    case SKFP_IOCSCMODE:
+        if (get_user(requested_mode, (int __user *)arg) == -EFAULT)
+            return -EFAULT;
+        if (    (requested_mode != SKFP_MMAP_MODE_DEFAULT)
+            &&  (requested_mode != SKFP_MMAP_MODE_WB)
+            &&  (requested_mode != SKFP_MMAP_MODE_WC)
+            &&  (requested_mode != SKFP_MMAP_MODE_WT))
+        {
+            return -EINVAL;
+        }
+        fpga.mmap_mode = requested_mode;
+        break;
+    case SKFP_IOCSSMCSET:
+        struct sk_fpga_smc_timings timings;
+        if (getuser(timings, (int __user *)arg) == -EFAULT)
+            return -EFAULT;
+        fpga.smc_timings.setup = timings.setup;
+        fpga.smc_timings.pulse = timings.pulse;
+        fpga.smc_timings.cycle = timings.cycle;
+        fpga.smc_timings.mode  = timings.mode;
+        if (!sk_fpga_setup_smc())
+            return -EFAULT;
+        break;
+    case SKFP_IOCSFREQ:
+        unsigned freq = 0;
+        if (getuser(freq, (int __user *)arg) == -EFAULT)
+            return -EFAULT;
+        fpga.fpga_frequency = freq;
+        ret = clk_set_rate(fpga.fpga_clk, fpga.fpga_frequency);
+        if (ret)
+        {
+            return -EFAULT;
+        }
+        break;
+    case SKFP_IOCQFREQ:
+        if (put_user(clk_get_rate(fpga.fpga_clk), (int __user *)arg) == -EFAULT)
+            return -EFAULT;
+    default:
+        return -ENOTTY;
+    }
+    return 0;
+}
+static int sk_fpga_open(struct inode *inode, struct file *file)
+{
+    unsigned long remap_flags = 0;
+    if (fpga.fpga_opened)
+    {
+        return -EBUSY;
+    }
+    else
+    {
+        fpga.fpga_opened += 1;
+    }
+    if (!request_mem_region(fpga.fpga_mem_phys_start,
+                            fpga.fpga_mem_window_size,
+                            "sk_fpga_memory"))
+    {
+        printk(KERN_ERR"Failed to request mem region\n");
+        return -EBUSY;
+    }
+    switch (fpga.mmap_mode)
+    {
+    case SKFP_MMAP_MODE_DEFAULT:
+        fpga.fpga_mem_virt_start = ioremap(fpga.fpga_mem_phys_start,
+                                           fpga.fpga_mem_window_size);
+        if (!fpga.fpga_mem_virt_start)
+        {
+            printk(KERN_ERR"Failed to ioremap mem region\n");
+            goto cancel;
+        }
+        break;
+    case SKFP_MMAP_MODE_WB:
+    case SKFP_MMAP_MODE_WC:
+    case SKFP_MMAP_MODE_WT:
+        if (fpga.mmap_mode == SKFP_MMAP_MODE_WB)
+            remap_flags = MEMREMAP_WB;
+        if (fpga.mmap_mode == SKFP_MMAP_MODE_WC)
+            remap_flags = MEMREMAP_WC;
+        if (fpga.mmap_mode == SKFP_MMAP_MODE_WT)
+            remap_flags = MEMREMAP_WT;
+        fpga.fpga_mem_virt_start = memremap(fpga.fpga_mem_phys_start,
+                                            fpga.fpga_mem_window_size,
+                                            remap_flags);
+        if (!fpga.fpga_mem_virt_start)
+        {
+            printk(KERN_ERR"Failed to memremap map region: flags = %ld\n", remap_flags);
+            goto cancel;
+        }
+        break;
+    default:
+        return -EINVAL;
+    }
+    return 0;
+cancel:
+    release_mem_region(fpga.fpga_mem_phys_start, fpga.fpga_mem_window_size);
+    return -EBUSY;
+}
+
+static int sk_fpga_close(struct inode *inodep, struct file *filp)
+{
+    if (fpga.fpga_mem_virt_start)
+    {
+        iounmap(fpga.fpga_mem_virt_start);
+    }
+    if (fpga.fpga_opened)
+    {
+        fpga.fpga_opened -= 1;
+    }
+    release_mem_region(fpga.fpga_mem_phys_start, fpga.fpga_mem_window_size);
+    return 0;
+}
+
+static ssize_t sk_fpga_write(struct file *file, const char __user *buf,
+                    size_t len, loff_t *ppos)
+{
+    uint16_t data = 0;
+    uint16_t res = copy_from_user(&data, buf, sizeof(uint16_t));
+    printk(KERN_ERR"Writing first short: %x\n", data);
+    writew(data, fpga.fpga_mem_virt_start);
+    return (sizeof(uint16_t) - res);
+}
+
+static ssize_t sk_fpga_read(struct file *file, char __user *buf,
+                    size_t len, loff_t *ppos)
+{
+    uint16_t data = readw(fpga.fpga_mem_virt_start);
+    uint16_t res = 0;
+    printk(KERN_ERR"Reading first short: %x\n", data);
+    res = copy_to_user(buf, &data, sizeof(data));
+    return (sizeof(uint16_t) - res);
+}
+
 static const struct file_operations fpga_fops = {
         .owner          = THIS_MODULE,
+        .write          = sk_fpga_write,
+        .read           = sk_fpga_read,
+        .open           = sk_fpga_open,
+        .unlocked_ioctl = sk_fpga_ioctl,
+        .release        = sk_fpga_close,
+        .mmap           = sk_fpga_mmap
 };
 
 static struct miscdevice sk_fpga_dev = {
@@ -163,6 +338,7 @@ int sk_fpga_fill_structure(struct platform_device *pdev)
         return ret;
     }
 
+    fpga.mmap_mode = SKFP_MMAP_MODE_DEFAULT;
     return 0;
 }
 

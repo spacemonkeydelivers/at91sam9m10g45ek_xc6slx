@@ -3,6 +3,8 @@
 
 // TODO: I don't think we need so many includes
 
+#ifdef __KERNEL__
+
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/interrupt.h>
@@ -78,11 +80,34 @@ struct sk_fpga
     int32_t fpga_irq_num;             // where to store assigned interrupt
     struct clk* fpga_clk;             // clock source for fpga
     uint8_t fpga_opened;              // fpga opened times
+    uint8_t mmap_mode;                // mmap mode for fpga
     struct sk_fpga_smc_timings smc_timings;
     uint32_t fpga_frequency;          // frequency for fpga
 };
 
 static int sk_fpga_remove (struct platform_device *pdev);
 static int sk_fpga_probe  (struct platform_device *pdev);
+
+// setup clk for fpga
+int sk_fpga_start_clk(struct platform_device *pdev);
+
+#endif //end of kernel-specific stuff
+
+//this part is available to user space apps
+
+#define SKFP_IOC_MAGIC 0x81
+
+// query size of mmio region
+#define SKFP_IOCQSIZE  _IOR(SKFP_IOC_MAGIC, 1, int)
+#define SKFP_IOCQCMODE _IOR(SKFP_IOC_MAGIC, 2, int)
+#define SKFP_IOCSCMODE _IOW(SKFP_IOC_MAGIC, 3, int)
+#define SKFP_IOCSSMCSET _IOW(SKFP_IOC_MAGIC, 4, struct sk_fpga_smc_timings)
+#define SKFP_IOCSFREQ   _IOW(SKFP_IOC_MAGIC, 5, unsigned)
+#define SKFP_IOCQFREQ   _IOW(SKFP_IOC_MAGIC, 6, unsigned)
+
+#define SKFP_MMAP_MODE_DEFAULT 0
+#define SKFP_MMAP_MODE_WB      1
+#define SKFP_MMAP_MODE_WT      2
+#define SKFP_MMAP_MODE_WC      3
 
 #endif
