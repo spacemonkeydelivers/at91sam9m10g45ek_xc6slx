@@ -187,6 +187,10 @@
 				status = "okay";
 			};
 
+			ac97: sound@fffac000 {
+				status = "okay";
+			};
+
 			adc0: adc@fffb0000 {
 				pinctrl-names = "default";
 				pinctrl-0 = <
@@ -266,64 +270,108 @@
 			};
 		};
 
-		nand0: nand@40000000 {
-			nand-bus-width = <8>;
-			nand-ecc-mode = "soft";
-			nand-on-flash-bbt;
+		ebi: ebi@10000000 {
 			status = "okay";
 
-			boot@0 {
-				label = "bootstrap/uboot/kernel";
-				reg = <0x0 0x400000>;
+			fpga0: fpga {
+				status = "okay";
+				compatible = "sk,at91-xc6slx";
+				atmel,smc-bus-width = <16>;
+				atmel,smc-read-mode = "nrd";
+				atmel,smc-write-mode = "nwe";
+				/* Initial values for SMC configuration, double check them in the driver */
+				atmel,smc-ncs-rd-setup-ns = <10>;
+				atmel,smc-ncs-wr-setup-ns = <10>;
+				atmel,smc-nrd-setup-ns = <10>;
+				atmel,smc-nwe-setup-ns = <10>;
+				atmel,smc-ncs-rd-pulse-ns = <80>;
+				atmel,smc-ncs-wr-pulse-ns = <80>;
+				atmel,smc-nrd-pulse-ns = <80>;
+				atmel,smc-nwe-pulse-ns = <80>;
+				atmel,smc-nrd-cycle-ns = <10>;
+				atmel,smc-nwe-cycle-ns = <10>;
+				atmel,smc-tdf-ns = <0>;
+				/* clock stuff might be depricated */
+				clocks = <&pck0>;
+				clock-names = "mclk";
+				#address-cells = <2>;
+				#size-cells = <1>;
+				reg = <0x0 0x0 0x10000000>;
+				/* Window size is surely less than 0x2000000 since only 25 address bit available*/
+				fpga-memory-window-size = <0x2000000>;
+				/* get start address from the ebi interface */
+				fpga-memory-start-address = <0x10000000>;
+				fpga-frequency = <133333333>;
+				pinctrl-names = "default";
+				pinctrl-0 = <
+					&pinctrl_pck0_as_fpga_clock
+					&pinctrl_pc28_as_fpga_irq
+					&pinctrl_fpga_prog
+					&pinctrl_pc12_as_fpga_reset>;
+				fpga-reset-gpio   = <&pioC 12 GPIO_ACTIVE_HIGH>;
+				fpga-irq-gpio     = <&pioC 28 GPIO_ACTIVE_HIGH>;
+				fpga-program-done = <&pioC 29 GPIO_ACTIVE_HIGH>;
+				fpga-program-cclk = <&pioC 10 GPIO_ACTIVE_HIGH>;
+				fpga-program-din  = <&pioC 11 GPIO_ACTIVE_HIGH>;
+				fpga-program-prog = <&pioC 30 GPIO_ACTIVE_HIGH>;
 			};
 
-			rootfs@400000 {
-				label = "rootfs";
-				reg = <0x400000 0x3C00000>;
-			};
+			nand_controller: nand-controller {
+				status = "okay";
+				pinctrl-0 = <&pinctrl_nand_cs &pinctrl_nand_rb>;
+				pinctrl-names = "default";
 
-			data@4000000 {
-				label = "data";
-				reg = <0x4000000 0xC000000>;
+				nand@3 {
+					reg = <0x3 0x0 0x10000000>;
+					rb-gpios = <&pioC 8 GPIO_ACTIVE_HIGH>;
+					cs-gpios = <&pioC 14 GPIO_ACTIVE_HIGH>;
+					nand-bus-width = <8>;
+					nand-ecc-mode = "soft";
+					nand-on-flash-bbt;
+					label = "atmel_nand";
+
+					partitions {
+						compatible = "fixed-partitions";
+						#address-cells = <1>;
+						#size-cells = <1>;
+                                                /* Need to finish the address map for the nand
+                                                 * and put it here
+                                                 */
+						bootstrap0 {
+							label = "bootstrap";
+							reg = <0x0 0x400000>;
+						};
+
+                                                uboot0 {
+							label = "uboot";
+							reg = <0x400000 0xa00000>;
+						};
+
+						rootfs@a00000 {
+							label = "rootfs";
+							reg = <0xa00000 0x80000000>;
+						};
+
+						data@4000000 {
+							label = "data";
+							reg = <0x4000000 0xC000000>;
+						};
+					};
+				};
 			};
 		};
 
-		usb0: ohci@00700000 {
+		usb0: ohci@700000 {
 			status = "okay";
 			num-ports = <2>;
 			atmel,vbus-gpio = <&pioD 1 GPIO_ACTIVE_LOW
 					   &pioD 3 GPIO_ACTIVE_LOW>;
 		};
 
-		usb1: ehci@00800000 {
+		usb1: ehci@800000 {
 			status = "okay";
 		};
 
-		fpga0: fpga@10000000 {
-			status = "okay";
-			compatible = "sk,at91-xc6slx";
-			clocks = <&pck0>;
-			clock-names = "mclk";
-			fpga-memory-window-size = <0x2000000>;
-			fpga-memory-start-address = <0x10000000>;
-			fpga-frequency = <133333333>;
-			fpga-smc-setup = <0x01010101>;
-			fpga-smc-pulse = <0x0a0a0a0a>;
-			fpga-smc-cycle = <0x000e000e>;
-			fpga-smc-mode  = <0x00001003>;
-			pinctrl-names = "default";
-			pinctrl-0 = <
-				&pinctrl_pck0_as_fpga_clock
-				&pinctrl_pc28_as_fpga_irq
-				&pinctrl_fpga_prog
-				&pinctrl_pc12_as_fpga_reset>;
-			fpga-reset-gpio   = <&pioC 12 GPIO_ACTIVE_HIGH>;
-			fpga-irq-gpio     = <&pioC 28 GPIO_ACTIVE_HIGH>;
-			fpga-program-done = <&pioC 29 GPIO_ACTIVE_HIGH>;
-			fpga-program-cclk = <&pioC 10 GPIO_ACTIVE_HIGH>;
-			fpga-program-din  = <&pioC 11 GPIO_ACTIVE_HIGH>;
-			fpga-program-prog = <&pioC 30 GPIO_ACTIVE_HIGH>;
-		};
 	};
 
 	leds {
