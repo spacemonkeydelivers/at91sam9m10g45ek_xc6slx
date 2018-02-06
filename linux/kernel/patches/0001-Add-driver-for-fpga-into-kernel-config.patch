@@ -1,0 +1,41 @@
+From 7b27e760c17d8a992ca6681f37c2caee73186a56 Mon Sep 17 00:00:00 2001
+From: Alex White <smd@hellheim.net>
+Date: Tue, 6 Feb 2018 10:04:51 +0300
+Subject: [PATCH] Add driver for fpga into kernel config
+
+---
+ drivers/misc/Kconfig  | 5 +++++
+ drivers/misc/Makefile | 1 +
+ 2 files changed, 6 insertions(+)
+
+diff --git a/drivers/misc/Kconfig b/drivers/misc/Kconfig
+index f1a5c23..5066a63 100644
+--- a/drivers/misc/Kconfig
++++ b/drivers/misc/Kconfig
+@@ -51,6 +51,11 @@ config AD525X_DPOT_SPI
+ 	  To compile this driver as a module, choose M here: the
+ 	  module will be called ad525x_dpot-spi.
+ 
++config SK_AT91_XC6SLX
++	tristate "FPGA driver for the SK at91sam9m10g45ek-xc6slx board"
++	help
++	  Select if you want a driver for the FPGA
++
+ config ATMEL_TCLIB
+ 	bool "Atmel AT32/AT91 Timer/Counter Library"
+ 	depends on (AVR32 || ARCH_AT91)
+diff --git a/drivers/misc/Makefile b/drivers/misc/Makefile
+index 5ca5f64..41b6b2d 100644
+--- a/drivers/misc/Makefile
++++ b/drivers/misc/Makefile
+@@ -55,6 +55,7 @@ obj-$(CONFIG_CXL_BASE)		+= cxl/
+ obj-$(CONFIG_ASPEED_LPC_CTRL)	+= aspeed-lpc-ctrl.o
+ obj-$(CONFIG_ASPEED_LPC_SNOOP)	+= aspeed-lpc-snoop.o
+ obj-$(CONFIG_PCI_ENDPOINT_TEST)	+= pci_endpoint_test.o
++obj-$(CONFIG_SK_AT91_XC6SLX)	+= fpga-sk-at91sam9m10g45-xc6slx.o
+ 
+ lkdtm-$(CONFIG_LKDTM)		+= lkdtm_core.o
+ lkdtm-$(CONFIG_LKDTM)		+= lkdtm_bugs.o
+-- 
+2.11.0
+

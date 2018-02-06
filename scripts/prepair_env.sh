@@ -20,7 +20,6 @@ fi
 
 PATH_KERNEL_README=$(realpath "$SK_AT91_FPGA_LINUX_ROOT/README" -m)
 PATH_DRIVER_DST=$(realpath "$SK_AT91_FPGA_LINUX_ROOT/drivers/misc" -m)
-PATH_MAKEFILE=$(realpath "$SK_AT91_FPGA_LINUX_ROOT/drivers/misc/Makefile" -m)
 PATH_DTS_DST=$(realpath "$SK_AT91_FPGA_LINUX_ROOT/arch/arm/boot/dts" -m)
 PATH_CFG_DST=$(realpath "$SK_AT91_FPGA_LINUX_ROOT/arch/arm/configs" -m)
 
@@ -72,15 +71,14 @@ make_link "$THIS_DIR/../linux/kernel/dev_fpga" "$PATH_DRIVER_DST"  "$DRIVER_H_SO
 make_link "$THIS_DIR/../linux/kernel/dts"      "$PATH_DTS_DST"     "$LINUX_DTS_SOURCE"
 make_link "$THIS_DIR/../linux/kernel/config"   "$PATH_CFG_DST"     "$LINUX_CONFIG_SOURCE"
 
-echo "patching makefile ($PATH_MAKEFILE)..."
-if [ ! -f "$PATH_MAKEFILE" ]; then
-    echo "$PATH_MAKEFILE does not exists. something is fishy"
-    exit -4
-fi
-sed -i '/.*CONFIG_STARTERKIT_AT91SAM9MG45_XC6SLX_CONFIG.*/d' "$PATH_MAKEFILE" \
-    || die 4 "sed (substitute) failed"
-OBJ_STR='obj-$(CONFIG_STARTERKIT_AT91SAM9MG45_XC6SLX_CONFIG)	+= fpga-sk-at91sam9m10g45-xc6slx.o'
-sed -i "1i$OBJ_STR" "$PATH_MAKEFILE" \
-    || die 5 "sed (embedding) failed"
+echo "Applying patches:"
+cd $SK_AT91_FPGA_LINUX_ROOT
+# maybe we need somehow to preserve the order of the patches
+for p in $(ls "$THIS_DIR/../linux/kernel/patches")
+do
+    echo "    Applying $p"
+    patch -p1 < $(realpath "$THIS_DIR/../linux/kernel/patches/$p" -m) -s
+done
+cd $THIS_DIR
 
 echo "great success"
