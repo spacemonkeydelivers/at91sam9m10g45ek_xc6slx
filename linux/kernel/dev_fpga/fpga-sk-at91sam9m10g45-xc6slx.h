@@ -60,6 +60,9 @@
 # define _DBG(fmt, args...) do { } while(0);
 #endif
 
+#define TMP_BUF_SIZE 4096
+#define MAX_WAIT_COUNTER 8*2048
+
 struct sk_fpga_smc_timings
 {
     uint32_t setup; // setup ebi timings
@@ -81,10 +84,10 @@ struct sk_fpga_pins
 
 enum fpga_state
 {
-	FPGA_UNDEFINED,         // undefined FPGA state when nothing yet happened
-	FPGA_RESET,             // FPGA is reseted, but not yet programmed
-	FPGA_READY_TO_PROGRAMM, // set FPGA to be ready to be programmed
-	FPGA_PROGRAMMED,        // FPGA is programmed and ready to work
+	FPGA_UNDEFINED,        // undefined FPGA state when nothing yet happened
+	FPGA_RESET,            // FPGA is reseted, but not yet programmed
+	FPGA_READY_TO_PROGRAM, // set FPGA to be ready to be programmed
+	FPGA_PROGRAMMED,       // FPGA is programmed and ready to work
 	FPGA_LAST,
 };
 
@@ -99,6 +102,7 @@ struct sk_fpga
     struct sk_fpga_smc_timings smc_timings; // holds timings for ebi
     struct sk_fpga_pins        fpga_pins; // pins to be used to programm fpga or interact with it
     enum   fpga_state          state; // current state of the fpga
+    uint8_t* fpga_prog_buffer; // tmp buffer to hold fpga firmware
 };
 
 // Maybe we want to hide some of these functions
@@ -112,6 +116,10 @@ static ssize_t sk_fpga_read   (struct file *file, char __user *buf,
                                size_t len, loff_t *ppos);
 static long    sk_fpga_ioctl  (struct file *f, unsigned int cmd, unsigned long arg);
 int            sk_fpga_setup_smc (void);
+// TODO: add description
+int sk_fpga_prepare_to_program (void);
+int sk_fpga_programming_done   (void);
+void sk_fpga_program (const uint8_t* buff, uint16_t bufLen);
 
 
 #define SKFP_IOC_MAGIC 0x81
@@ -123,5 +131,9 @@ int            sk_fpga_setup_smc (void);
 #define SKFPGA_IOSMODE _IOR(SKFP_IOC_MAGIC, 3, int)
 // ioctl to get the current mode for the FPGA
 #define SKFPGA_IOQMODE _IOW(SKFP_IOC_MAGIC, 4, int)
+// ioctl to set the current mode for the FPGA
+#define SKFPGA_IOSPROG_DONE _IOR(SKFP_IOC_MAGIC, 5, int)
+// ioctl to get the current mode for the FPGA
+#define SKFPGA_IOQPROG_DONE _IOW(SKFP_IOC_MAGIC, 6, int)
 
 #endif

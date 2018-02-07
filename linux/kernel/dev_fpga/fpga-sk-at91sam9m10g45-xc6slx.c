@@ -40,11 +40,16 @@ static int sk_fpga_close(struct inode *inodep, struct file *filp)
 static ssize_t sk_fpga_write(struct file *file, const char __user *buf,
                              size_t len, loff_t *ppos)
 {
-    uint16_t data = 0;
-    uint16_t res = copy_from_user(&data, buf, sizeof(uint16_t));
-    _DBG(KERN_ERR"Writing first short: %x\n", data);
-    writew(data, fpga.fpga_mem_virt_start);
-    return (sizeof(uint16_t) - res);
+    // Write to fpga is only allowed when it's in programming state
+    if (fpga.state == FPGA_READY_TO_PROGRAM) {
+        uint16_t bytes_to_copy = (TMP_BUF_SIZE < len) ? TMP_BUF_SIZE : len;
+        int res = copy_from_user(fpga.fpga_prog_buffer, buf, bytes_to_copy);
+        _DBG("Copying to FPGA %d bytes, %d bytes left to copy", bytes_to_copy, res);
+        sk_fpga_program(fpga.fpga_prog_buffer, (bytes_to_copy - res));
+        return (bytes_to_copy - res);
+    } else {
+        return -ENOTTY;
+    }
 }
 
 static ssize_t sk_fpga_read(struct file *file, char __user *buf,
@@ -61,8 +66,10 @@ static long sk_fpga_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 {
     struct sk_fpga_smc_timings timings = {0};
     enum fpga_state mode = FPGA_UNDEFINED;
+    int pin_done_state = 0;
     switch (cmd)
     {
+    // set current fpga ebi timings
     case SKFPGA_IOSSMCTIMINGS:
         if (copy_from_user(&timings, (int __user *)arg, sizeof(struct sk_fpga_smc_timings)))
             return -EFAULT;
@@ -73,20 +80,37 @@ static long sk_fpga_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
         if (!sk_fpga_setup_smc())
             return -EFAULT;
         break;
+    // Get current fpga ebi timings
     case SKFPGA_IOQSMCTIMINGS:
         if (copy_to_user((int __user *)arg, &fpga.smc_timings, sizeof(struct sk_fpga_smc_timings)))
             return -EFAULT;
         break;
+    // set current fpga mode
     case SKFPGA_IOSMODE:
         if (get_user(mode, (int __user *)arg) == -EFAULT)
             return -EFAULT;
-        if (mode != FPGA_READY_TO_PROGRAMM) {
+        if (mode == FPGA_READY_TO_PROGRAM) {
+            if (sk_fpga_prepare_to_program())
+                return -EFAULT;
+        } else {
             return -EINVAL;
         }
-        fpga.state = mode;
         break;
+    // Get current fpga mode
     case SKFPGA_IOQMODE:
         if (put_user(fpga.state, (int __user *)arg) == -EFAULT)
+            return -EFAULT;
+        break;
+    // call fpga prog finish when whole firmware has been programmed
+    case SKFPGA_IOSPROG_DONE:
+        if (sk_fpga_programming_done())
+            return -EFAULT;
+        break;
+    // check status of done pin
+    case SKFPGA_IOQPROG_DONE:
+        // TODO: read actual done pin value
+        pin_done_state = (fpga.state == FPGA_PROGRAMMED);
+        if (put_user(pin_done_state, (int __user *)arg) == -EFAULT)
             return -EFAULT;
         break;
     default:
@@ -95,6 +119,7 @@ static long sk_fpga_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
     return 0;
 }
 
+// TODO: reuse existing atmel ebi interfaces
 int sk_fpga_setup_smc(void)
 {
     int ret = -EIO;
@@ -242,7 +267,7 @@ static int sk_fpga_probe (struct platform_device *pdev)
         return -EINVAL;
     }
 
-    // set reset ping to up   
+    // set reset pin to up
     gpio_request(fpga.fpga_pins.fpga_reset, "sk_fpga_reset_pin");
     gpio_direction_output(fpga.fpga_pins.fpga_reset, 1);
     gpio_set_value(fpga.fpga_pins.fpga_reset, 1);
@@ -252,6 +277,126 @@ static int sk_fpga_probe (struct platform_device *pdev)
     fpga.opened = 0;
 
     return ret;
+}
+
+// TODO: try to adopt existing FPGA spi programming code in kernel
+int sk_fpga_prepare_to_program(void)
+{
+    int ret = 0;
+    _DBG("FPGA programming is started");
+    // acquire pins to program FPGA
+    ret = gpio_request(fpga.fpga_pins.fpga_prog, "sk_fpga_prog_pin");
+    if (ret) {
+        _DBG("Failed to allocate fpga prog pin");
+        goto release_prog_pin;
+    }
+    gpio_direction_output(fpga.fpga_pins.fpga_prog, 1);
+    ret = gpio_request(fpga.fpga_pins.fpga_cclk, "sk_fpga_cclk_pin");
+    if (ret) {
+        _DBG("Failed to allocate fpga cclk pin");
+        goto release_cclk_pin;
+    }
+    gpio_direction_output(fpga.fpga_pins.fpga_cclk, 1);
+    ret = gpio_request(fpga.fpga_pins.fpga_din, "sk_fpga_din_pin");
+    if (ret) {
+        _DBG("Failed to allocate fpga din pin");
+        goto release_din_pin;
+    }
+    gpio_direction_output(fpga.fpga_pins.fpga_din, 1);
+    ret = gpio_request(fpga.fpga_pins.fpga_done, "sk_fpga_done_pin");
+    if (ret) {
+        _DBG("Failed to allocate fpga done pin");
+        goto release_done_pin;
+    }
+    gpio_direction_input(fpga.fpga_pins.fpga_done);
+
+    // perform sort of firmware reset on fpga
+    gpio_set_value(fpga.fpga_pins.fpga_prog, 0);
+    gpio_set_value(fpga.fpga_pins.fpga_prog, 1);
+    // allocate tmp buffer
+    fpga.fpga_prog_buffer = kmalloc(TMP_BUF_SIZE, GFP_KERNEL);
+    if (!fpga.fpga_prog_buffer) {
+        _DBG("Failed to allocate memory for tmp buffer");
+        return -ENOMEM;
+    }
+    // set fpga state to be programmed
+    fpga.state = FPGA_READY_TO_PROGRAM;
+    return 0;
+
+release_done_pin:
+    gpio_free(fpga.fpga_pins.fpga_done);
+release_din_pin:
+    gpio_free(fpga.fpga_pins.fpga_cclk);
+release_cclk_pin:
+    gpio_free(fpga.fpga_pins.fpga_cclk);
+release_prog_pin:
+    gpio_free(fpga.fpga_pins.fpga_prog);
+    return -ENODEV;
+}
+
+int sk_fpga_programming_done(void)
+{
+    int counter, i, done = 0;
+    enum fpga_state state = FPGA_PROGRAMMED;
+    int ret = 0;
+    gpio_set_value(fpga.fpga_pins.fpga_din, 1);
+    done = gpio_get_value(fpga.fpga_pins.fpga_done);
+    counter = 0;
+    // toggle fpga clock while done signal appears
+    while (!done) {
+        gpio_set_value(fpga.fpga_pins.fpga_cclk, 1);
+        gpio_set_value(fpga.fpga_pins.fpga_cclk, 0);
+        done = gpio_get_value(fpga.fpga_pins.fpga_done);
+        counter++;
+        if (counter > MAX_WAIT_COUNTER) {
+            _DBG("Failed to get FPGA done pin as high");
+            ret = -EIO;
+            // might want to set it to undefined
+            state = FPGA_READY_TO_PROGRAM;
+            goto finish;
+        }
+    }
+    // toggle clock a little bit just to ensure nothing's wrong
+    for (i = 0; i < 10; i++) {
+        gpio_set_value(fpga.fpga_pins.fpga_cclk, 1);
+        gpio_set_value(fpga.fpga_pins.fpga_cclk, 0);
+    }
+
+finish:
+    if (!ret)
+        _DBG("FPGA programming is done");
+    // release program pins
+    gpio_free(fpga.fpga_pins.fpga_done);
+    gpio_free(fpga.fpga_pins.fpga_cclk);
+    gpio_free(fpga.fpga_pins.fpga_cclk);
+    gpio_free(fpga.fpga_pins.fpga_prog);
+    // release tmp buffer
+    kfree(fpga.fpga_prog_buffer);
+    // set fpga state as programmed
+    fpga.state = state;
+    return ret;
+}
+
+void sk_fpga_program(const uint8_t* buff, uint16_t bufLen)
+{
+    int i, j;
+    unsigned char byte;
+    unsigned char bit;
+    _DBG("Programming %d bytes", bufLen);
+    for (i = 0; i < bufLen; i++) {
+        byte = buff[i];
+        for (j = 7; j >= 0; j--) {
+            bit = 1 << j;
+            bit &= byte;
+            if (bit) {
+                gpio_set_value(fpga.fpga_pins.fpga_din, 1);
+            } else {
+                gpio_set_value(fpga.fpga_pins.fpga_din, 0);
+            }
+            gpio_set_value(fpga.fpga_pins.fpga_cclk, 1);
+            gpio_set_value(fpga.fpga_pins.fpga_cclk, 0);
+        }
+    }
 }
 
 static int sk_fpga_remove(struct platform_device *pdev)
