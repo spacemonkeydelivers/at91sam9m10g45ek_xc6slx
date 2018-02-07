@@ -54,35 +54,74 @@
 #define SMC_DELAY7 0xD8
 #define SMC_DELAY8 0xDC
 
+#ifdef DEBUG
+# define _DBG(fmt, args...) printk(KERN_ALERT "%s: " fmt "\n", __FUNCTION__, ##args)
+#else
+# define _DBG(fmt, args...) do { } while(0);
+#endif
+
 struct sk_fpga_smc_timings
 {
-    uint32_t setup;
-    uint32_t pulse;
-    uint32_t cycle;
-    uint32_t mode;
+    uint32_t setup; // setup ebi timings
+    uint32_t pulse; // pulse ebi timings
+    uint32_t cycle; // cycle ebi timings
+    uint32_t mode;  // ebi mode
+};
+
+struct sk_fpga_pins
+{
+    uint8_t fpga_cclk;                // pin to run cclk on fpga
+    uint8_t fpga_din;                 // pin to set data to fpga
+    uint8_t fpga_done;                // pin to read status done from fpga
+    uint8_t fpga_prog;                // pin to set mode to prog on fpga
+    uint8_t fpga_reset;               // pin to reset fpga internal state
+    // uint8_t fpga_irq_out;             // pin to assert irq on arm side
+    // uint8_t fpga_irq_in;              // pin to assert irq on fpga side
+};
+
+enum fpga_state
+{
+	FPGA_UNDEFINED,         // undefined FPGA state when nothing yet happened
+	FPGA_RESET,             // FPGA is reseted, but not yet programmed
+	FPGA_READY_TO_PROGRAMM, // set FPGA to be ready to be programmed
+	FPGA_PROGRAMMED,        // FPGA is programmed and ready to work
+	FPGA_LAST,
 };
 
 struct sk_fpga
 {
     struct platform_device *pdev;
+    // be aware that real window size is limited by 25 address lines
     uint32_t fpga_mem_window_size;    // phys mem size on any cs pin
     uint32_t fpga_mem_phys_start;     // phys mapped addr of fpga mem on cs0
     uint16_t* fpga_mem_virt_start;    // virt mapped addr of fpga mem on cs0
-    uint8_t fpga_irq_pin;             // pin to recieve irq from fpga on arm
-    uint8_t fpga_reset_pin;           // pin to reset fpga internal state
-    uint8_t fpga_cclk;                // pin to run cclk on fpga
-    uint8_t fpga_din;                 // pin to set data to fpga
-    uint8_t fpga_done;                // pin to read status done from fpga
-    uint8_t fpga_prog;                // pin to set mode to prog on fpga
-    wait_queue_head_t fpga_wait_queue;// queue for external interrupt
-    int32_t fpga_irq_num;             // where to store assigned interrupt
-    struct clk* fpga_clk;             // clock source for fpga
-    uint8_t fpga_opened;              // fpga opened times
-    struct sk_fpga_smc_timings smc_timings;
-    uint32_t fpga_frequency;          // frequency for fpga
+    uint8_t opened;                   // fpga opened times
+    struct sk_fpga_smc_timings smc_timings; // holds timings for ebi
+    struct sk_fpga_pins        fpga_pins; // pins to be used to programm fpga or interact with it
+    enum   fpga_state          state; // current state of the fpga
 };
 
-static int sk_fpga_remove (struct platform_device *pdev);
-static int sk_fpga_probe  (struct platform_device *pdev);
+// Maybe we want to hide some of these functions
+static int     sk_fpga_remove (struct platform_device *pdev);
+static int     sk_fpga_probe  (struct platform_device *pdev);
+static int     sk_fpga_close  (struct inode *inodep, struct file *filp);
+static int     sk_fpga_open   (struct inode *inode, struct file *file);
+static ssize_t sk_fpga_write  (struct file *file, const char __user *buf,
+                               size_t len, loff_t *ppos);
+static ssize_t sk_fpga_read   (struct file *file, char __user *buf,
+                               size_t len, loff_t *ppos);
+static long    sk_fpga_ioctl  (struct file *f, unsigned int cmd, unsigned long arg);
+int            sk_fpga_setup_smc (void);
+
+
+#define SKFP_IOC_MAGIC 0x81
+// ioctl to set SMC timings
+#define SKFPGA_IOSSMCTIMINGS _IOW(SKFP_IOC_MAGIC, 1, struct sk_fpga_smc_timings)
+// ioctl to request SMC timings
+#define SKFPGA_IOQSMCTIMINGS _IOR(SKFP_IOC_MAGIC, 2, struct sk_fpga_smc_timings)
+// ioctl to set the current mode for the FPGA
+#define SKFPGA_IOSMODE _IOR(SKFP_IOC_MAGIC, 3, int)
+// ioctl to get the current mode for the FPGA
+#define SKFPGA_IOQMODE _IOW(SKFP_IOC_MAGIC, 4, int)
 
 #endif
