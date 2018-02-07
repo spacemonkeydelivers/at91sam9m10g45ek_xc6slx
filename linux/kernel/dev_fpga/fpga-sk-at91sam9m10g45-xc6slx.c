@@ -404,6 +404,8 @@ static int sk_fpga_remove(struct platform_device *pdev)
     _DBG(KERN_ALERT"Removing FPGA driver for SK-AT91SAM9M10G45EK-XC6SLX\n");
     misc_deregister(&sk_fpga_dev);
     gpio_free(fpga.fpga_pins.fpga_reset);
+    if (fpga.fpga_prog_buffer)
+        kfree(fpga.fpga_prog_buffer);
     fpga.state = FPGA_UNDEFINED;
     return 0;
 }
