@@ -4,6 +4,8 @@ NET "cs_i[1]" LOC = N3;
 NET "read_i" LOC = T6;
 NET "write_i" LOC = N4;
 NET "reset_i" LOC = B2;
+NET "irq_i" LOC = B3;
+NET "irq_o" LOC = B4;
 
 NET "data_io[0]" LOC = V9;
 NET "data_io[1]" LOC = R10;

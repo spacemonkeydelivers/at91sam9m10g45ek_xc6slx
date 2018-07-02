@@ -1,4 +1,4 @@
-#include <linux/drivers/misc/fpga-sk-at91sam9m10g45-xc6slx.h>
+//#include <linux-4.15/drivers/misc/fpga-sk-at91sam9m10g45-xc6slx.h>
 
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -12,179 +12,262 @@
 #include <stdio.h>
 #include <stdint.h>
 
-typedef struct program_opt
+#include <cassert>
+#include <cerrno>
+
+// TODO: merge ioctl defines with ones in kernel
+#define SKFP_IOC_MAGIC 0x81
+// ioctl to write data to FPGA
+#define SKFPGA_IOSDATA _IOW(SKFP_IOC_MAGIC, 1, struct sk_fpga_data)
+// ioctl to read data from FPGA
+#define SKFPGA_IOGDATA _IOW(SKFP_IOC_MAGIC, 2, struct sk_fpga_data)
+// ioctl to set SMC timings
+#define SKFPGA_IOSSMCTIMINGS _IOW(SKFP_IOC_MAGIC, 3, struct sk_fpga_smc_timings)
+// ioctl to request SMC timings
+#define SKFPGA_IOGSMCTIMINGS _IOR(SKFP_IOC_MAGIC, 4, struct sk_fpga_smc_timings)
+// ioctl to programm FPGA
+#define SKFPGA_IOSPROG _IOR(SKFP_IOC_MAGIC, 5, uint8_t)
+// ioctl to use reset
+#define SKFPGA_IOSRESET _IOR(SKFP_IOC_MAGIC, 6, uint8_t)
+// ioctl to get reset pin level
+#define SKFPGA_IOGRESET _IOR(SKFP_IOC_MAGIC, 7, uint8_t)
+// ioctl to set arm-to-fpga pin level
+#define SKFPGA_IOSHOSTIRQ _IOR(SKFP_IOC_MAGIC, 8, uint8_t)
+// ioctl to get arm-to-fpga pin level
+#define SKFPGA_IOGHOSTIRQ _IOR(SKFP_IOC_MAGIC, 9, uint8_t)
+// TODO: implement later
+// ioctl to set fpga-to-arm as irq
+#define SKFPGA_IOSFPGAIRQ _IOR(SKFP_IOC_MAGIC, 10, uint8_t)
+// ioctl to get fpga-to-arm pin level
+#define SKFPGA_IOGFPGAIRQ _IOR(SKFP_IOC_MAGIC, 11, uint8_t)
+
+
+// TODO: merge data structures with ones in kernel
+struct sk_fpga_smc_timings
 {
-    int mmap_mode;
-    int byte_granularity;
+    uint32_t setup; // setup ebi timings
+    uint32_t pulse; // pulse ebi timings
+    uint32_t cycle; // cycle ebi timings
+    uint32_t mode;  // ebi mode
+};
 
-    int valid;
-} program_opt;
-
-struct program_opt parse_opts(int argc, char* argv[])
+struct sk_fpga_data
 {
-    program_opt result;
+    uint32_t address;
+    uint16_t data;
+};
 
-    result.mmap_mode        = SKFP_MMAP_MODE_DEFAULT;
-    result.byte_granularity = 1;
-    result.valid            = 1;
-
-    int i = 0;
-    for (i = 2; i < argc; ++i) {
-
-        if (strcmp(argv[i], "--int") == 0) {
-            result.byte_granularity = 0;
-        }
-        if (strcmp(argv[i], "--byte") == 0) {
-            result.byte_granularity = 1;
-        }
-        if (strcmp(argv[i], "--attrs") == 0) {
-
-            int a_idx = i + 1;
-
-            if (a_idx >= argc) {
-                fprintf(stderr, "%s", "invalid number of arguments!\n");
-                result.valid = -1;
-                return result;
-            }
-            const char* attr = argv[a_idx];
-
-            if (strcmp(attr, "WB") == 0)
-                result.mmap_mode = SKFP_MMAP_MODE_WB;
-            else if (strcmp(attr, "WC") == 0)
-                result.mmap_mode = SKFP_MMAP_MODE_WC;
-            else if (strcmp(attr, "WT") == 0)
-                result.mmap_mode = SKFP_MMAP_MODE_WT;
-            else if (strcmp(attr, "DEFAULT") == 0)
-                result.mmap_mode = SKFP_MMAP_MODE_DEFAULT;
-            else
-                result.valid = -1;
-
-            if (result.valid <= 0) {
-                fprintf(stderr, "invalid --attr argument: \"%s\"\n", attr);
-                return result;
-            }
-
-            i = a_idx;
-        }
-    }
-    return result;
-}
-
-void write_byte_sequence(volatile uint8_t* const ptr, int bytes_num)
+class Fpga
 {
-    if (!bytes_num)
-        return;
+public:
 
-    int i = 0;
-    for (i = 0; i < bytes_num; ++i) {
-        ptr[i] = (uint8_t)i;
-    }
-}
-
-int set_smc_timings(struct sk_fpga_smc_timings* timings)
-{
-    return (ioctl(fd, SKFP_IOCSSMCSET, timings) == -1)
-}
-
-int set_fpga_frequency(unsigned freq)
-{
-    return (ioctl(fd, SKFP_IOCSFREQ, &freq) == -1)
-}
-
-int get_fpga_frequency(unsigned* freq)
-{
-    return (ioctl(fd, SKFP_IOCQFREQ, freq) == -1)
-}
-
-void write_int_sequence(volatile uint32_t* const ptr, int bytes_num)
-{
-    if (!bytes_num)
-        return;
-
-    uintptr_t PTR_VAL = (uintptr_t)ptr;
-    if (PTR_VAL & 0b11) //this means that address is not 4-byte aligined
+    // TODO: merge state enum with one in kernel
+    enum class FpgaState
     {
-        volatile uint8_t* byte_ptr = (volatile uint8_t*)ptr;
-        *byte_ptr = 0xf0 | (PTR_VAL & 0xf);
-        //inefficient, but should work
-        write_int_sequence((volatile uint32_t*)(byte_ptr + 1), bytes_num - 1);
-        return;
+        FPGA_UNDEFINED = 0,    // undefined FPGA state when nothing yet happened
+        FPGA_READY_TO_PROGRAM, // set FPGA to be ready to be programmed
+        FPGA_PROGRAMMED,       // FPGA is programmed and ready to work
+        FPGA_LAST,
+    };
+
+    // TODO: get that data from kernel
+    // 25 address bits + 1 chip select equals to 64 megabytes addressable
+    static constexpr uint8_t FPGA_ADDR_BITS = 26;
+    static constexpr uint32_t MAX_FPGA_ADDR = (1 << FPGA_ADDR_BITS);
+    Fpga() = delete;
+    
+    Fpga(const char* dev)
+    {
+        m_fd = open(dev, O_RDWR);
+        fprintf(stderr, "Open %d\n", m_fd);
+        assert(IsOpened());
     }
-    const int inum = bytes_num / 4;
-    int i = 0;
-    for (i = 0; i < inum; ++i) {
-        ptr[i] = (uint32_t)i;
+    
+    ~Fpga()
+    {
+        assert(IsOpened());
+        close(m_fd);
     }
 
-    write_byte_sequence((volatile uint8_t*)(ptr + inum), bytes_num % 4);
-}
+    bool IsOpened() const
+    {
+        return m_fd > 0;
+    }
+
+    bool GetTimings(sk_fpga_smc_timings* t)
+    {
+        return(ioctl(m_fd, SKFPGA_IOGSMCTIMINGS, t) == -1);
+    }
+
+    bool SetTimings(sk_fpga_smc_timings* t)
+    {
+        return(ioctl(m_fd, SKFPGA_IOSSMCTIMINGS, t) == -1);
+    }
+
+    bool ReadShort(sk_fpga_data* d) const
+    {
+        assert(IsOpened());
+        assert(d->address < MAX_FPGA_ADDR);
+        return(ioctl(m_fd, SKFPGA_IOGDATA, d) == -1);
+    }
+
+    bool WriteShort(sk_fpga_data* d)
+    {
+        assert(IsOpened());
+        assert(d->address < MAX_FPGA_ADDR);
+        return(ioctl(m_fd, SKFPGA_IOSDATA, d) == -1);
+    }
+
+    void Write(const uint8_t* buf, uint32_t num)
+    {
+        if (!num)
+        {
+            return;
+        }
+        uint32_t bytesLeft = 0;
+        do
+        {
+            ssize_t res = write(m_fd, (buf + bytesLeft), (num - bytesLeft));
+            // fail occured
+            if (res == -1)
+            {
+                return;
+            }
+            else
+            {
+                bytesLeft += res;
+            }
+        }
+        while(bytesLeft != num);
+    }
+
+    void Read()
+    {
+        ;
+    }
+
+    void WriteMmap()
+    {
+        ;
+    }
+
+    void ReadMmap()
+    {
+        ;
+    }
+
+    void WriteDma()
+    {
+        ;
+    }
+
+    void ReadDma()
+    {
+        ;
+    }
+
+    void GetTimings()
+    {
+        ;
+    }
+
+    void SetTimings()
+    {
+        ;
+    }
+
+    void RegisterCallbackOnInterrupt()
+    {
+        // register signal SIGIO
+        ;
+    }
+
+    bool SetReset(bool reset)
+    {
+        uint8_t res = reset ? 1 : 0;
+        return(ioctl(m_fd, SKFPGA_IOSRESET, &res) == -1);
+    }
+
+    uint8_t GetReset()
+    {
+        uint8_t reset = -1;
+        if (!(ioctl(m_fd, SKFPGA_IOGRESET, &reset) == -1))
+        {
+            return -1;
+        }
+        else
+        {
+            return reset;
+        }
+    }
+
+    bool SetHostToFpgaIrq(bool val)
+    {
+        uint8_t res = val ? 1 : 0;
+        return(ioctl(m_fd, SKFPGA_IOSHOSTIRQ, &res) == -1);
+    }
+
+    bool GetHostToFpgaIrq()
+    {
+        uint8_t val = -1;
+        if (!(ioctl(m_fd, SKFPGA_IOGHOSTIRQ, &val) == -1))
+        {
+            return -1;
+        }
+        else
+        {
+            return val;
+        }
+    }
+
+    bool GetFpgaToHostIrq()
+    {
+        uint8_t val = -1;
+        if (!(ioctl(m_fd, SKFPGA_IOGFPGAIRQ, &val) == -1))
+        {
+            return -1;
+        }
+        else
+        {
+            return val;
+        }
+    }
+
+private:
+    int m_fd = -EFAULT;
+};
 
 int main (int argc, char* argv[])
 {
-    if (argc < 2) {
-        printf("%s",
-               "usage:\nfpga_loader <filename> [--attrs attr] [--byte] [--int]\n"
-               "    attr can be one of WB,WC,WT,DEFAULT\n");
-        return 0;
+    Fpga f("/dev/fpga");
+    sk_fpga_data data = {0x0301, 0x1};
+    sk_fpga_smc_timings timings = {0x01010101,0x0a0a0a0a, 0x000e000e, (0x3 | 1<<12)};
+    sk_fpga_smc_timings rTimings;
+    // set smc timings
+    f.SetTimings(&timings);
+    // read smc timings
+    f.GetTimings(&rTimings);
+    // compare smc timings
+    if (memcmp(&timings, &rTimings, sizeof(timings)))
+    {
+        fprintf(stderr, "Timings don't match\n");
+        assert(0);
     }
-
-    program_opt opts = parse_opts(argc, argv);
-    if (opts.valid <= 0)
-        return -1;
-
-    int result       = -1;
-    int window_size  = 0;
-    volatile void* mmap_area = 0;
-
-    const char* filename = argv[1];
-
-    int fd = open(filename, O_RDWR);
-
-    if (fd == -1) {
-        perror("open()");
-        goto cleanup;
+    // release reset
+    f.SetReset(true);
+    for (uint16_t i = 0; i < (1 << 23); i += 2)
+    {
+        data = {static_cast<uint32_t>(i << 1), 0x1};
+        fprintf(stderr, "Reading data by %x address\n", (i << 1));
+        f.ReadShort(&data);
+        if (static_cast<uint16_t>(i << 1) == data.data)
+        {
+            fprintf(stderr, "Data read as expected\n");
+        }
+        else
+        {
+            fprintf(stderr, "Unexpected data read: address 0x%x data 0x%x\n", data.address, data.data);
+            assert(0);
+        }
     }
-
-    printf("%s is opened\n", filename);
-
-    if (ioctl(fd, SKFP_IOCQSIZE, &window_size) == -1) {
-        perror("ioctl (size)");
-        goto cleanup;
-    }
-    printf("resulting buffer size: 0x%x\n", window_size);
-
-    if (ioctl(fd, SKFP_IOCSCMODE, &opts.mmap_mode) == -1) {
-        perror("ioctl (set mode)");
-        goto cleanup;
-    }
-
-    mmap_area = mmap(0, window_size, PROT_WRITE|PROT_READ, MAP_SHARED, fd, 0);
-    if (mmap_area == MAP_FAILED) {
-        perror("mmap");
-        goto cleanup;
-    }
-
-    if (opts.byte_granularity) {
-        printf("writing data using byte access...\n");
-        write_byte_sequence(mmap_area, window_size);
-    }
-    else {
-        printf("writing data using 32-bit access...\n");
-        write_int_sequence(mmap_area, window_size);
-    }
-    printf("%d bytes were written\n", window_size);
-
-    result = 0;
-
-cleanup:
-
-    if (mmap_area && (mmap_area != MAP_FAILED)) {
-        munmap((void*)mmap_area, window_size);
-        mmap_area = 0;
-    }
-
-    if (fd != -1)
-        close(fd);
-    fd = 0;
-    return result;
 }

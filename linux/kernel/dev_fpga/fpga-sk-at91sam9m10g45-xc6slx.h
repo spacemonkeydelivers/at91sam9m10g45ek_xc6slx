@@ -60,6 +60,8 @@
 # define _DBG(fmt, args...) do { } while(0);
 #endif
 
+#define DEBUG
+
 #define TMP_BUF_SIZE 4096
 #define MAX_WAIT_COUNTER 8*2048
 
@@ -71,6 +73,12 @@ struct sk_fpga_smc_timings
     uint32_t mode;  // ebi mode
 };
 
+struct sk_fpga_data
+{
+    uint32_t address;
+    uint16_t data;
+};
+
 struct sk_fpga_pins
 {
     uint8_t fpga_cclk;                // pin to run cclk on fpga
@@ -78,17 +86,16 @@ struct sk_fpga_pins
     uint8_t fpga_done;                // pin to read status done from fpga
     uint8_t fpga_prog;                // pin to set mode to prog on fpga
     uint8_t fpga_reset;               // pin to reset fpga internal state
-    // uint8_t fpga_irq_out;             // pin to assert irq on arm side
-    // uint8_t fpga_irq_in;              // pin to assert irq on fpga side
+    uint8_t fpga_irq;                 // pin to trigger irq on arm side
+    uint8_t host_irq;                 // pin to trigger irq on fpga side
 };
 
 enum fpga_state
 {
-	FPGA_UNDEFINED,        // undefined FPGA state when nothing yet happened
-	FPGA_RESET,            // FPGA is reseted, but not yet programmed
-	FPGA_READY_TO_PROGRAM, // set FPGA to be ready to be programmed
-	FPGA_PROGRAMMED,       // FPGA is programmed and ready to work
-	FPGA_LAST,
+    FPGA_UNDEFINED = 0,    // undefined FPGA state when nothing yet happened
+    FPGA_READY_TO_PROGRAM, // set FPGA to be ready to be programmed
+    FPGA_PROGRAMMED,       // FPGA is programmed and ready to work
+    FPGA_LAST,
 };
 
 struct sk_fpga
@@ -96,13 +103,19 @@ struct sk_fpga
     struct platform_device *pdev;
     // be aware that real window size is limited by 25 address lines
     uint32_t fpga_mem_window_size;    // phys mem size on any cs pin
-    uint32_t fpga_mem_phys_start;     // phys mapped addr of fpga mem on cs0
-    uint16_t* fpga_mem_virt_start;    // virt mapped addr of fpga mem on cs0
+    uint32_t fpga_mem_phys_start_cs0; // phys mapped addr of fpga mem on cs0
+    uint32_t fpga_mem_phys_start_cs1; // phys mapped addr of fpga mem on cs1
+    uint16_t __iomem* fpga_mem_virt_start_cs0;// virt mapped addr of fpga mem on cs0
+    uint16_t __iomem* fpga_mem_virt_start_cs1;// virt mapped addr of fpga mem on cs1
     uint8_t opened;                   // fpga opened times
     struct sk_fpga_smc_timings smc_timings; // holds timings for ebi
     struct sk_fpga_pins        fpga_pins; // pins to be used to programm fpga or interact with it
     enum   fpga_state          state; // current state of the fpga
     uint8_t* fpga_prog_buffer; // tmp buffer to hold fpga firmware
+    uint32_t address;
+    uint16_t transactionSize;
+    struct clk* fpga_clk;
+    uint32_t    fpga_freq;
 };
 
 // Maybe we want to hide some of these functions
@@ -116,24 +129,53 @@ static ssize_t sk_fpga_read   (struct file *file, char __user *buf,
                                size_t len, loff_t *ppos);
 static long    sk_fpga_ioctl  (struct file *f, unsigned int cmd, unsigned long arg);
 int            sk_fpga_setup_smc (void);
+int            sk_fpga_read_smc (void);
 // TODO: add description
 int sk_fpga_prepare_to_program (void);
 int sk_fpga_programming_done   (void);
 void sk_fpga_program (const uint8_t* buff, uint16_t bufLen);
 
 
+enum prog_state
+{
+    FPGA_PROG_PREPARE = 0,
+    FPGA_PROG_FLUSH_BUF,
+    FPGA_PROG_FINISH,
+    FPGA_PROG_LAST,
+};
+
 #define SKFP_IOC_MAGIC 0x81
+// ioctl to write data to FPGA
+#define SKFPGA_IOSDATA _IOW(SKFP_IOC_MAGIC, 1, struct sk_fpga_data)
+// ioctl to read data from FPGA
+#define SKFPGA_IOGDATA _IOW(SKFP_IOC_MAGIC, 2, struct sk_fpga_data)
 // ioctl to set SMC timings
-#define SKFPGA_IOSSMCTIMINGS _IOW(SKFP_IOC_MAGIC, 1, struct sk_fpga_smc_timings)
+#define SKFPGA_IOSSMCTIMINGS _IOW(SKFP_IOC_MAGIC, 3, struct sk_fpga_smc_timings)
 // ioctl to request SMC timings
-#define SKFPGA_IOQSMCTIMINGS _IOR(SKFP_IOC_MAGIC, 2, struct sk_fpga_smc_timings)
+#define SKFPGA_IOGSMCTIMINGS _IOR(SKFP_IOC_MAGIC, 4, struct sk_fpga_smc_timings)
+// ioctl to programm FPGA
+#define SKFPGA_IOSPROG _IOR(SKFP_IOC_MAGIC, 5, uint8_t)
+// ioctl to set reset pin level
+#define SKFPGA_IOSRESET _IOR(SKFP_IOC_MAGIC, 6, uint8_t)
+// ioctl to get reset pin level
+#define SKFPGA_IOGRESET _IOR(SKFP_IOC_MAGIC, 7, uint8_t)
+// ioctl to set arm-to-fpga pin level
+#define SKFPGA_IOSHOSTIRQ _IOR(SKFP_IOC_MAGIC, 8, uint8_t)
+// ioctl to get arm-to-fpga pin level
+#define SKFPGA_IOGHOSTIRQ _IOR(SKFP_IOC_MAGIC, 9, uint8_t)
+// TODO: implement later
+// ioctl to set fpga-to-arm as irq
+#define SKFPGA_IOSFPGAIRQ _IOR(SKFP_IOC_MAGIC, 10, uint8_t)
+// ioctl to get fpga-to-arm pin level
+#define SKFPGA_IOGFPGAIRQ _IOR(SKFP_IOC_MAGIC, 11, uint8_t)
+
 // ioctl to set the current mode for the FPGA
-#define SKFPGA_IOSMODE _IOR(SKFP_IOC_MAGIC, 3, int)
+//#define SKFPGA_IOSMODE _IOR(SKFP_IOC_MAGIC, 3, int)
 // ioctl to get the current mode for the FPGA
-#define SKFPGA_IOQMODE _IOW(SKFP_IOC_MAGIC, 4, int)
+//#define SKFPGA_IOQMODE _IOW(SKFP_IOC_MAGIC, 4, int)
 // ioctl to set the current mode for the FPGA
-#define SKFPGA_IOSPROG_DONE _IOR(SKFP_IOC_MAGIC, 5, int)
+//#define SKFPGA_IOSPROG_DONE _IOR(SKFP_IOC_MAGIC, 5, int)
 // ioctl to get the current mode for the FPGA
-#define SKFPGA_IOQPROG_DONE _IOW(SKFP_IOC_MAGIC, 6, int)
+//#define SKFPGA_IOQPROG_DONE _IOW(SKFP_IOC_MAGIC, 6, int)
 
 #endif

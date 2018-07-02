@@ -1,7 +1,7 @@
 `timescale 1ns / 1ps
 `define CHIP_SELECT_LOW_TO_HIGH			2'b01 // chip select pin switches from low to high
 
-module blinky(
+module simple_debug(
     inout wire [15:0] data_io,		// input-output data bus
     input wire [24:0] addr_i,			// input address bus
     input wire read_i,					// input read strobe
@@ -9,6 +9,8 @@ module blinky(
     input wire [1:0] cs_i,				// input chip select strobe
     input wire clk_i,					// input clk signal
     input wire reset_i,					// external reset signal, if low - reset
+    input wire irq_i,					// external pin to irq to fpga
+    output wire irq_o,					// external pin to irq by fpga
 	 output wire [4:0] leds_o			// leds out
 );
 
@@ -32,10 +34,12 @@ module blinky(
 	reg	[31:0] counter = 0; // internal counter reg
 
 	assign leds_o[0] = 1;
-	assign leds_o[1] = counter[29];
-	assign leds_o[2] = counter[30];
-	assign leds_o[3] = counter[31];
+	assign leds_o[1] = counter[0];
+	assign leds_o[2] = counter[31];
+	assign leds_o[3] = irq_i;
 	assign leds_o[4] = stored_data[0];
+
+   assign irq_o = 1;
 
 	// iobuf instance
 	genvar y;
@@ -52,8 +56,8 @@ module blinky(
 	endgenerate
 
 	// becomes true if chip select was switched from low to high
-//	wire iface_accessed = {stage_2, stage_3} == `CHIP_SELECT_LOW_TO_HIGH;
-    wire iface_accessed = !chip_select;
+	wire iface_accessed = {stage_2, stage_3} == `CHIP_SELECT_LOW_TO_HIGH;
+//    wire iface_accessed = !chip_select;
 
 	always @ (posedge clk_i) 
 	begin
@@ -80,6 +84,8 @@ module blinky(
 				begin
 					// skip LSB due to 16 bit data transactions
 					data_from_iface <= addr_i[15:0];
+//					data_from_iface <= 16'h5aa5;
+//					data_from_iface <= 16'ha55a;
 				end
 				// get data to fpga
 				if (!write_i)
