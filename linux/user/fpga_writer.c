@@ -61,6 +61,14 @@ class Fpga
 {
 public:
 
+    enum class ProgState
+    {
+        FPGA_PROG_PREPARE = 0,
+        FPGA_PROG_FLUSH_BUF,
+        FPGA_PROG_FINISH,
+        FPGA_PROG_LAST,
+    };
+
     // TODO: merge state enum with one in kernel
     enum class FpgaState
     {
@@ -81,6 +89,44 @@ public:
         m_fd = open(dev, O_RDWR);
         fprintf(stderr, "Open %d\n", m_fd);
         assert(IsOpened());
+    }
+
+    // return true in case of error, wtf?!
+    bool ProgramFpga(const char* fw)
+    {
+        int fd = open(fw, O_RDONLY);
+        if (fd > 0)
+        {
+            uint8_t action = static_cast<uint8_t>(ProgState::FPGA_PROG_PREPARE);
+            struct stat st;
+            fstat(fd, &st);
+            uint8_t tmp[ 4096 ] = {};
+            if (!(ioctl(m_fd, SKFPGA_IOSPROG, &action) == -1))
+            {
+                int i = 0;
+                action = static_cast<uint8_t>(ProgState::FPGA_PROG_FLUSH_BUF);
+                while (i < st.st_size)
+                {
+                    ssize_t num = read(fd, tmp, 4096);
+                    Write(tmp, num);
+                    if (ioctl(m_fd, SKFPGA_IOSPROG, &action) == -1)
+                    {
+                        return true;
+                    }
+                    i += num;
+                }
+                action = static_cast<uint8_t>(ProgState::FPGA_PROG_FINISH);
+                return (ioctl(m_fd, SKFPGA_IOSPROG, &action) == -1);
+            }
+            else
+            {
+                return true;
+            }
+        }
+        else
+        {
+            return true;
+        }
     }
     
     ~Fpga()
@@ -240,6 +286,7 @@ private:
 int main (int argc, char* argv[])
 {
     Fpga f("/dev/fpga");
+    f.ProgramFpga("./simple_debug.bit");
     sk_fpga_data data = {0x0301, 0x1};
     sk_fpga_smc_timings timings = {0x01010101,0x0a0a0a0a, 0x000e000e, (0x3 | 1<<12)};
     sk_fpga_smc_timings rTimings;
@@ -255,14 +302,14 @@ int main (int argc, char* argv[])
     }
     // release reset
     f.SetReset(true);
-    for (uint16_t i = 0; i < (1 << 23); i += 2)
+    for (uint16_t i = 0; i < (1 << 27); i += 2)
     {
         data = {static_cast<uint32_t>(i << 1), 0x1};
         fprintf(stderr, "Reading data by %x address\n", (i << 1));
         f.ReadShort(&data);
         if (static_cast<uint16_t>(i << 1) == data.data)
         {
-            fprintf(stderr, "Data read as expected\n");
+//            fprintf(stderr, "Data read as expected\n");
         }
         else
         {
