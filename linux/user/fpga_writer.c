@@ -94,13 +94,13 @@ public:
     // return true in case of error, wtf?!
     bool ProgramFpga(const char* fw)
     {
+        uint8_t tmp[ 4096 ] = {};
         int fd = open(fw, O_RDONLY);
         if (fd > 0)
         {
             uint8_t action = static_cast<uint8_t>(ProgState::FPGA_PROG_PREPARE);
             struct stat st;
             fstat(fd, &st);
-            uint8_t tmp[ 4096 ] = {};
             if (!(ioctl(m_fd, SKFPGA_IOSPROG, &action) == -1))
             {
                 int i = 0;

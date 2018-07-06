@@ -87,7 +87,6 @@ static ssize_t sk_fpga_write(struct file *file, const char __user *buf,
     int i = 0;
     uint16_t bytes_to_copy = (TMP_BUF_SIZE < len) ? TMP_BUF_SIZE : len;
     int res = copy_from_user(fpga.fpga_prog_buffer, buf, bytes_to_copy);
-    printk(KERN_ALERT"Copying to FPGA %d bytes, %d bytes left to copy", bytes_to_copy, res);
     fpga.transactionSize = bytes_to_copy;
     if (fpga.state != FPGA_READY_TO_PROGRAM)
     {
@@ -575,6 +574,10 @@ int sk_fpga_prepare_to_program (void)
     int ret = 0;
     printk(KERN_ALERT"FPGA programming is started");
     // acquire pins to program FPGA
+    gpio_free(fpga.fpga_pins.fpga_done);
+    gpio_free(fpga.fpga_pins.fpga_din);
+    gpio_free(fpga.fpga_pins.fpga_cclk);
+    gpio_free(fpga.fpga_pins.fpga_prog);
     ret = gpio_request(fpga.fpga_pins.fpga_prog, "sk_fpga_prog_pin");
     if (ret) {
         printk(KERN_ALERT"Failed to allocate fpga prog pin");
@@ -610,7 +613,7 @@ int sk_fpga_prepare_to_program (void)
 release_done_pin:
     gpio_free(fpga.fpga_pins.fpga_done);
 release_din_pin:
-    gpio_free(fpga.fpga_pins.fpga_cclk);
+    gpio_free(fpga.fpga_pins.fpga_din);
 release_cclk_pin:
     gpio_free(fpga.fpga_pins.fpga_cclk);
 release_prog_pin:
@@ -624,7 +627,6 @@ void sk_fpga_program (const uint8_t* buff, uint16_t bufLen)
     int i, j;
     unsigned char byte;
     unsigned char bit;
-    printk(KERN_ALERT"Programming %d bytes", bufLen);
     for (i = 0; i < bufLen; i++) {
         byte = buff[i];
         for (j = 7; j >= 0; j--) {
@@ -675,7 +677,7 @@ finish:
         printk(KERN_ALERT"FPGA programming is done");
     // release program pins
     gpio_free(fpga.fpga_pins.fpga_done);
-    gpio_free(fpga.fpga_pins.fpga_cclk);
+    gpio_free(fpga.fpga_pins.fpga_din);
     gpio_free(fpga.fpga_pins.fpga_cclk);
     gpio_free(fpga.fpga_pins.fpga_prog);
     // set fpga state as programmed
