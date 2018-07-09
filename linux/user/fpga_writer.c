@@ -287,7 +287,6 @@ int main (int argc, char* argv[])
 {
     Fpga f("/dev/fpga");
     f.ProgramFpga("./simple_debug.bit");
-    sk_fpga_data data = {0x0301, 0x1};
     sk_fpga_smc_timings timings = {0x01010101,0x0a0a0a0a, 0x000e000e, (0x3 | 1<<12)};
     sk_fpga_smc_timings rTimings;
     // set smc timings
@@ -302,19 +301,30 @@ int main (int argc, char* argv[])
     }
     // release reset
     f.SetReset(true);
-    for (uint16_t i = 0; i < (1 << 27); i += 2)
+    uint32_t sAddr = 0x2000;
+    uint16_t sData = 0x1055;
+    // RAM is mapped to 0x2000 - 0x2040 addresses
+    // Write 32 cells 16 bits
+    for (unsigned i = 0; i < 32*2; i+=2)
     {
-        data = {static_cast<uint32_t>(i << 1), 0x1};
-        fprintf(stderr, "Reading data by %x address\n", (i << 1));
-        f.ReadShort(&data);
-        if (static_cast<uint16_t>(i << 1) == data.data)
-        {
-//            fprintf(stderr, "Data read as expected\n");
-        }
-        else
-        {
-            fprintf(stderr, "Unexpected data read: address 0x%x data 0x%x\n", data.address, data.data);
-            assert(0);
-        }
+        sk_fpga_data d  = {sAddr + i, sData + i};
+        f.WriteShort(&d);
+        fprintf(stderr, "Writing %x : %x\n", sAddr + i, sData + i);
     }
+
+    // Check non-RAM address, should return 16 bits of address requested
+    sk_fpga_data d  = {(sAddr + 64), sData + 32};
+    f.ReadShort(&d);
+    fprintf(stderr, "Valid check: %x : %x\n", d.address, d.data);
+    assert(d.data == d.address);
+
+    // Verify written values
+    for (unsigned i = 0; i < 32 * 2; i+=2)
+    {
+        sk_fpga_data d  = {sAddr + i, sData + i};
+        f.ReadShort(&d);
+        fprintf(stderr, "Reading %x : %x\n", d.address, d.data);
+        assert(d.data == (sData + i));
+    }
+
 }
