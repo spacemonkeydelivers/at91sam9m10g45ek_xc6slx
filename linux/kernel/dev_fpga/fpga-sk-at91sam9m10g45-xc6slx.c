@@ -2,6 +2,12 @@
 
 #define DEBUG
 
+
+#include <linux/fs.h>
+#include <asm/segment.h>
+#include <asm/uaccess.h>
+#include <linux/buffer_head.h>
+
 struct sk_fpga fpga;
 
 static const struct file_operations fpga_fops = {
@@ -85,27 +91,26 @@ static ssize_t sk_fpga_write(struct file *file, const char __user *buf,
                              size_t len, loff_t *ppos)
 {
     int i = 0;
+    uint16_t* start = NULL;
     uint16_t bytes_to_copy = (TMP_BUF_SIZE < len) ? TMP_BUF_SIZE : len;
     int res = copy_from_user(fpga.fpga_prog_buffer, buf, bytes_to_copy);
     fpga.transactionSize = bytes_to_copy;
-    if (fpga.state != FPGA_READY_TO_PROGRAM)
+    start = sk_fpga_ptr_by_addr(fpga.address);
+    // 2 since byte vs short
+    BUG_ON(bytes_to_copy % 2);
+    for (; i < bytes_to_copy; i += 2)
     {
-        uint16_t* start = sk_fpga_ptr_by_addr(fpga.address);
-        // 2 since byte vs short
-        BUG_ON(bytes_to_copy % 2);
-        for (; i < bytes_to_copy; i += 2)
-        {
-            iowrite16(fpga.fpga_prog_buffer[i], start + i);
-        }
+        iowrite16(fpga.fpga_prog_buffer[i], start + i);
     }
     return (bytes_to_copy - res);
 }
 
 static long sk_fpga_ioctl (struct file *f, unsigned int cmd, unsigned long arg)
 {
+    int ret = 0;
     struct sk_fpga_data data = {0};
-    uint8_t action = 0;
     uint8_t value = 0;
+    char fName[256] = {0};
     switch (cmd)
     {
     // set current fpga ebi timings
@@ -145,24 +150,10 @@ static long sk_fpga_ioctl (struct file *f, unsigned int cmd, unsigned long arg)
     // write buf - flush buf - repeat
     // programming done
     case SKFPGA_IOSPROG:
-        if (copy_from_user(&action, (int __user *)arg, sizeof(uint8_t)))
+        if (copy_from_user(fName, (int __user *)arg, sizeof(char)*PROG_FILE_NAME_LEN))
             return -EFAULT;
-        if (action == FPGA_PROG_PREPARE)
-        {
-            sk_fpga_prepare_to_program();
-        }
-        else if (action == FPGA_PROG_FLUSH_BUF)
-        {
-            sk_fpga_program(fpga.fpga_prog_buffer, fpga.transactionSize);
-        }
-        else if (action == FPGA_PROG_FINISH)
-        {
-            sk_fpga_programming_done();
-        }
-        else
-        {
+        if (sk_fpga_prog(fName))
             return -EFAULT;
-        }
         break;
 
     // toggle reset ping
@@ -218,7 +209,7 @@ static long sk_fpga_ioctl (struct file *f, unsigned int cmd, unsigned long arg)
     default:
         return -ENOTTY;
     }
-    return 0;
+    return ret;
 }
 
 // TODO: reuse existing atmel ebi interfaces and data from dtb
@@ -408,7 +399,6 @@ static int sk_fpga_probe (struct platform_device *pdev)
     int ret = -EIO;
     memset(&fpga, 0, sizeof(fpga));
     fpga.pdev = pdev;
-    fpga.state = FPGA_UNDEFINED;
 
     printk(KERN_ALERT"Loading FPGA driver for SK-AT91SAM9M10G45EK-XC6SLX\n");
 
@@ -557,7 +547,6 @@ static int sk_fpga_remove (struct platform_device *pdev)
     printk(KERN_ALERT"Removing FPGA driver for SK-AT91SAM9M10G45EK-XC6SLX\n");
     misc_deregister(&sk_fpga_dev);
     kfree(fpga.fpga_prog_buffer);
-    fpga.state = FPGA_UNDEFINED;
     iounmap(fpga.fpga_mem_virt_start_cs0);
     release_mem_region(fpga.fpga_mem_phys_start_cs0, fpga.fpga_mem_window_size);
     iounmap(fpga.fpga_mem_virt_start_cs1);
@@ -606,8 +595,6 @@ int sk_fpga_prepare_to_program (void)
     // perform sort of firmware reset on fpga
     gpio_set_value(fpga.fpga_pins.fpga_prog, 0);
     gpio_set_value(fpga.fpga_pins.fpga_prog, 1);
-    // set fpga state to be programmed
-    fpga.state = FPGA_READY_TO_PROGRAM;
     return 0;
 
 release_done_pin:
@@ -622,7 +609,7 @@ release_prog_pin:
 }
 
 // TODO: refactoring needed
-void sk_fpga_program (const uint8_t* buff, uint16_t bufLen)
+void sk_fpga_program (const uint8_t* buff, uint32_t bufLen)
 {
     int i, j;
     unsigned char byte;
@@ -630,13 +617,8 @@ void sk_fpga_program (const uint8_t* buff, uint16_t bufLen)
     for (i = 0; i < bufLen; i++) {
         byte = buff[i];
         for (j = 7; j >= 0; j--) {
-            bit = 1 << j;
-            bit &= byte;
-            if (bit) {
-                gpio_set_value(fpga.fpga_pins.fpga_din, 1);
-            } else {
-                gpio_set_value(fpga.fpga_pins.fpga_din, 0);
-            }
+            bit = (1 << j) & byte;
+            gpio_set_value(fpga.fpga_pins.fpga_din, bit ? 1 : 0);
             gpio_set_value(fpga.fpga_pins.fpga_cclk, 1);
             gpio_set_value(fpga.fpga_pins.fpga_cclk, 0);
         }
@@ -647,7 +629,6 @@ void sk_fpga_program (const uint8_t* buff, uint16_t bufLen)
 int sk_fpga_programming_done (void)
 {
     int counter, i, done = 0;
-    enum fpga_state state = FPGA_PROGRAMMED;
     int ret = 0;
     gpio_set_value(fpga.fpga_pins.fpga_din, 1);
     done = gpio_get_value(fpga.fpga_pins.fpga_done);
@@ -662,7 +643,6 @@ int sk_fpga_programming_done (void)
             printk(KERN_ALERT"Failed to get FPGA done pin as high");
             ret = -EIO;
             // might want to set it to undefined
-            state = FPGA_READY_TO_PROGRAM;
             goto finish;
         }
     }
@@ -680,8 +660,46 @@ finish:
     gpio_free(fpga.fpga_pins.fpga_din);
     gpio_free(fpga.fpga_pins.fpga_cclk);
     gpio_free(fpga.fpga_pins.fpga_prog);
-    // set fpga state as programmed
-    fpga.state = state;
+    return ret;
+}
+
+int sk_fpga_prog (char* fName)
+{
+    int ret = 0;
+    struct file *f;
+    mm_segment_t fs;
+    ssize_t len = 0;
+    loff_t off = 0;
+
+    if (sk_fpga_prepare_to_program())
+    {
+        return -ENODEV;
+    }
+
+    f = filp_open(fName, O_RDONLY, 0);
+    if(f == NULL)
+    {
+        printk(KERN_ALERT "Failed to open file: %s", fName);
+        return -ENOMEM;
+    }
+    else
+    {
+        fs = get_fs();
+        set_fs(get_ds());
+        do
+        {
+            len = kernel_read(f, fpga.fpga_prog_buffer, TMP_BUF_SIZE, &off);
+            sk_fpga_program(fpga.fpga_prog_buffer, len);
+        }
+        while (len);
+        set_fs(fs);
+        filp_close(f, NULL);
+    }
+    if (sk_fpga_programming_done())
+    {
+        return -ENODEV;
+    }
+
     return ret;
 }
 

@@ -35,6 +35,11 @@
 #include <linux/of_gpio.h>
 
 
+#include <linux/module.h>  // Needed by all modules
+#include <linux/kernel.h>  // Needed for KERN_INFO
+#include <linux/fs.h>      // Needed by filp
+#include <asm/uaccess.h>   // Needed by segment descriptors
+
 #define SMC_ADDRESS 0xFFFFE800
 #define SMC_ADDRESS_WINDOW 0xff
 #define SMC_SETUP(num) (0x10 * num + 0x00)
@@ -63,6 +68,7 @@
 #define DEBUG
 
 #define TMP_BUF_SIZE 4096
+#define PROG_FILE_NAME_LEN 256
 #define MAX_WAIT_COUNTER 8*2048
 
 struct sk_fpga_smc_timings
@@ -90,14 +96,6 @@ struct sk_fpga_pins
     uint8_t host_irq;                 // pin to trigger irq on fpga side
 };
 
-enum fpga_state
-{
-    FPGA_UNDEFINED = 0,    // undefined FPGA state when nothing yet happened
-    FPGA_READY_TO_PROGRAM, // set FPGA to be ready to be programmed
-    FPGA_PROGRAMMED,       // FPGA is programmed and ready to work
-    FPGA_LAST,
-};
-
 struct sk_fpga
 {
     struct platform_device *pdev;
@@ -110,7 +108,6 @@ struct sk_fpga
     uint8_t opened;                   // fpga opened times
     struct sk_fpga_smc_timings smc_timings; // holds timings for ebi
     struct sk_fpga_pins        fpga_pins; // pins to be used to programm fpga or interact with it
-    enum   fpga_state          state; // current state of the fpga
     uint8_t* fpga_prog_buffer; // tmp buffer to hold fpga firmware
     uint32_t address;
     uint16_t transactionSize;
@@ -133,7 +130,8 @@ int            sk_fpga_read_smc (void);
 // TODO: add description
 int sk_fpga_prepare_to_program (void);
 int sk_fpga_programming_done   (void);
-void sk_fpga_program (const uint8_t* buff, uint16_t bufLen);
+void sk_fpga_program (const uint8_t* buff, uint32_t bufLen);
+int sk_fpga_prog(char* fName);
 
 
 enum prog_state
@@ -154,7 +152,7 @@ enum prog_state
 // ioctl to request SMC timings
 #define SKFPGA_IOGSMCTIMINGS _IOR(SKFP_IOC_MAGIC, 4, struct sk_fpga_smc_timings)
 // ioctl to programm FPGA
-#define SKFPGA_IOSPROG _IOR(SKFP_IOC_MAGIC, 5, uint8_t)
+#define SKFPGA_IOSPROG _IOR(SKFP_IOC_MAGIC, 5, char[PROG_FILE_NAME_LEN])
 // ioctl to set reset pin level
 #define SKFPGA_IOSRESET _IOR(SKFP_IOC_MAGIC, 6, uint8_t)
 // ioctl to get reset pin level

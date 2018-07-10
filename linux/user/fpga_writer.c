@@ -26,7 +26,7 @@
 // ioctl to request SMC timings
 #define SKFPGA_IOGSMCTIMINGS _IOR(SKFP_IOC_MAGIC, 4, struct sk_fpga_smc_timings)
 // ioctl to programm FPGA
-#define SKFPGA_IOSPROG _IOR(SKFP_IOC_MAGIC, 5, uint8_t)
+#define SKFPGA_IOSPROG _IOR(SKFP_IOC_MAGIC, 5, char[256])
 // ioctl to use reset
 #define SKFPGA_IOSRESET _IOR(SKFP_IOC_MAGIC, 6, uint8_t)
 // ioctl to get reset pin level
@@ -94,39 +94,9 @@ public:
     // return true in case of error, wtf?!
     bool ProgramFpga(const char* fw)
     {
-        uint8_t tmp[ 4096 ] = {};
-        int fd = open(fw, O_RDONLY);
-        if (fd > 0)
-        {
-            uint8_t action = static_cast<uint8_t>(ProgState::FPGA_PROG_PREPARE);
-            struct stat st;
-            fstat(fd, &st);
-            if (!(ioctl(m_fd, SKFPGA_IOSPROG, &action) == -1))
-            {
-                int i = 0;
-                action = static_cast<uint8_t>(ProgState::FPGA_PROG_FLUSH_BUF);
-                while (i < st.st_size)
-                {
-                    ssize_t num = read(fd, tmp, 4096);
-                    Write(tmp, num);
-                    if (ioctl(m_fd, SKFPGA_IOSPROG, &action) == -1)
-                    {
-                        return true;
-                    }
-                    i += num;
-                }
-                action = static_cast<uint8_t>(ProgState::FPGA_PROG_FINISH);
-                return (ioctl(m_fd, SKFPGA_IOSPROG, &action) == -1);
-            }
-            else
-            {
-                return true;
-            }
-        }
-        else
-        {
-            return true;
-        }
+        char tmp[256];
+        strcpy(tmp, fw);
+        return (ioctl(m_fd, SKFPGA_IOSPROG, &tmp) == -1);
     }
     
     ~Fpga()
@@ -305,23 +275,23 @@ int main (int argc, char* argv[])
     uint16_t sData = 0x1055;
     // RAM is mapped to 0x2000 - 0x2040 addresses
     // Write 32 cells 16 bits
-    for (unsigned i = 0; i < 32*2; i+=2)
+    for (uint16_t i = 0; i < 32*2; i+=2)
     {
-        sk_fpga_data d  = {sAddr + i, sData + i};
+        sk_fpga_data d  = {sAddr + i, static_cast<uint16_t>(sData + i)};
         f.WriteShort(&d);
         fprintf(stderr, "Writing %x : %x\n", sAddr + i, sData + i);
     }
 
     // Check non-RAM address, should return 16 bits of address requested
-    sk_fpga_data d  = {(sAddr + 64), sData + 32};
+    sk_fpga_data d  = {(sAddr + 64u), static_cast<uint16_t>(sData + 32u)};
     f.ReadShort(&d);
     fprintf(stderr, "Valid check: %x : %x\n", d.address, d.data);
     assert(d.data == d.address);
 
     // Verify written values
-    for (unsigned i = 0; i < 32 * 2; i+=2)
+    for (uint16_t i = 0; i < 32 * 2; i+=2)
     {
-        sk_fpga_data d  = {sAddr + i, sData + i};
+        sk_fpga_data d  = {sAddr + i, static_cast<uint16_t>(sData + i)};
         f.ReadShort(&d);
         fprintf(stderr, "Reading %x : %x\n", d.address, d.data);
         assert(d.data == (sData + i));
