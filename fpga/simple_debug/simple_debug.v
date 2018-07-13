@@ -25,7 +25,7 @@ module simple_debug(
    //signal which controls tristate iobuf
    wire disable_io;
    assign disable_io = (read_i);
-   wire chip_select = cs_i[0] || cs_i[1];
+   wire chip_select = cs_i[0] && cs_i[1];
 
    // to deal with external io data bus
    wire [DATA_WIDTH - 1:0] data_to_iface;
@@ -42,7 +42,8 @@ module simple_debug(
    assign leds_o[3] = irq_i;
    assign leds_o[4] = stored_data[0];
 
-   assign irq_o = 1;
+   reg cs1 = 0;
+   assign irq_o = cs1;
 
    // iobuf instance
    genvar y;
@@ -92,6 +93,7 @@ module simple_debug(
          stage_2 <= 0;
          stage_1 <= 0;
          data_from_iface <= 0;
+         cs1 <= 0;
       end
       else
       begin
@@ -100,12 +102,12 @@ module simple_debug(
          stage_3 <= stage_2;
          stage_2 <= stage_1;
          stage_1 <= chip_select;
-
          if (iface_accessed)
          begin
             // put data from fpga
             if (!read_i)
             begin
+               cs1 <= read_i;
                if (ram_accessed)
                begin
                   data_from_iface <= ram_d;

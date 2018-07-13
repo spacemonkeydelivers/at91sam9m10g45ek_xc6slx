@@ -40,15 +40,20 @@
 #include <linux/fs.h>      // Needed by filp
 #include <asm/uaccess.h>   // Needed by segment descriptors
 
+#define MATRIX_ADDRESS 0xFFFFEA00
+#define MATRIX_ADDRESS_WINDOW 0x200
+#define EBICSA_OFFSET 0x128
+#define EBICSA_CS1_MASK (1 << 1)
+
 #define SMC_ADDRESS 0xFFFFE800
 #define SMC_ADDRESS_WINDOW 0xff
-#define SMC_SETUP(num) (0x10 * num + 0x00)
+#define SMC_SETUP(addr, num) (addr + (0x10/sizeof(uint32_t) * num) + 0x00/sizeof(uint32_t))
 #define SMC_SETUP_DATA (0x01010101)
-#define SMC_PULSE(num) (0x10 * num + 0x04)
+#define SMC_PULSE(addr, num) (addr + (0x10/sizeof(uint32_t) * num) + 0x04/sizeof(uint32_t))
 #define SMC_PULSE_DATA (0x0a0a0a0a)
-#define SMC_CYCLE(num) (0x10 * num + 0x08)
+#define SMC_CYCLE(addr, num) (addr + (0x10/sizeof(uint32_t) * num) + 0x08/sizeof(uint32_t))
 #define SMC_CYCLE_DATA (0x000e000e)
-#define SMC_MODE(num)  (0x10 * num + 0x0C)
+#define SMC_MODE(addr, num)  (addr + (0x10/sizeof(uint32_t) * num) + 0x0C/sizeof(uint32_t))
 #define SMC_MODE_DATA  (0x3 | 1 << 12)
 #define SMC_DELAY1 0xC0
 #define SMC_DELAY2 0xC4
@@ -71,12 +76,21 @@
 #define PROG_FILE_NAME_LEN 256
 #define MAX_WAIT_COUNTER 8*2048
 
+enum addr_selector
+{
+    FPGA_ADDR_UNDEFINED = 0,
+    FPGA_ADDR_CS0,
+    FPGA_ADDR_CS1,
+    FPGA_ADDR_LAST,
+};
+
 struct sk_fpga_smc_timings
 {
     uint32_t setup; // setup ebi timings
     uint32_t pulse; // pulse ebi timings
     uint32_t cycle; // cycle ebi timings
     uint32_t mode;  // ebi mode
+    uint8_t  num;
 };
 
 struct sk_fpga_data
@@ -110,9 +124,9 @@ struct sk_fpga
     struct sk_fpga_pins        fpga_pins; // pins to be used to programm fpga or interact with it
     uint8_t* fpga_prog_buffer; // tmp buffer to hold fpga firmware
     uint32_t address;
-    uint16_t transactionSize;
     struct clk* fpga_clk;
     uint32_t    fpga_freq;
+    enum addr_selector fpga_addr_sel;
 };
 
 // Maybe we want to hide some of these functions
@@ -125,6 +139,7 @@ static ssize_t sk_fpga_write  (struct file *file, const char __user *buf,
 static ssize_t sk_fpga_read   (struct file *file, char __user *buf,
                                size_t len, loff_t *ppos);
 static long    sk_fpga_ioctl  (struct file *f, unsigned int cmd, unsigned long arg);
+int            sk_fpga_setup_ebicsa (void);
 int            sk_fpga_setup_smc (void);
 int            sk_fpga_read_smc (void);
 // TODO: add description
@@ -132,15 +147,9 @@ int sk_fpga_prepare_to_program (void);
 int sk_fpga_programming_done   (void);
 void sk_fpga_program (const uint8_t* buff, uint32_t bufLen);
 int sk_fpga_prog(char* fName);
+static int sk_fpga_mmap (struct file *file, struct vm_area_struct * vma);
 
 
-enum prog_state
-{
-    FPGA_PROG_PREPARE = 0,
-    FPGA_PROG_FLUSH_BUF,
-    FPGA_PROG_FINISH,
-    FPGA_PROG_LAST,
-};
 
 #define SKFP_IOC_MAGIC 0x81
 // ioctl to write data to FPGA
@@ -166,6 +175,10 @@ enum prog_state
 #define SKFPGA_IOSFPGAIRQ _IOR(SKFP_IOC_MAGIC, 10, uint8_t)
 // ioctl to get fpga-to-arm pin level
 #define SKFPGA_IOGFPGAIRQ _IOR(SKFP_IOC_MAGIC, 11, uint8_t)
+// ioctl to set address space selector
+#define SKFPGA_IOSADDRSEL _IOR(SKFP_IOC_MAGIC, 12, uint8_t)
+// ioctl to get address space selector
+#define SKFPGA_IOGADDRSEL _IOR(SKFP_IOC_MAGIC, 13, uint8_t)
 
 // ioctl to set the current mode for the FPGA
 //#define SKFPGA_IOSMODE _IOR(SKFP_IOC_MAGIC, 3, int)

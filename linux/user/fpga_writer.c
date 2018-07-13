@@ -40,7 +40,18 @@
 #define SKFPGA_IOSFPGAIRQ _IOR(SKFP_IOC_MAGIC, 10, uint8_t)
 // ioctl to get fpga-to-arm pin level
 #define SKFPGA_IOGFPGAIRQ _IOR(SKFP_IOC_MAGIC, 11, uint8_t)
+// ioctl to set address space selector
+#define SKFPGA_IOSADDRSEL _IOR(SKFP_IOC_MAGIC, 12, uint8_t)
+// ioctl to get address space selector
+#define SKFPGA_IOGADDRSEL _IOR(SKFP_IOC_MAGIC, 13, uint8_t)
 
+enum class addr_selector
+{
+    FPGA_ADDR_UNDEFINED = 0,
+    FPGA_ADDR_CS0,
+    FPGA_ADDR_CS1,
+    FPGA_ADDR_LAST,
+};
 
 // TODO: merge data structures with ones in kernel
 struct sk_fpga_smc_timings
@@ -49,6 +60,7 @@ struct sk_fpga_smc_timings
     uint32_t pulse; // pulse ebi timings
     uint32_t cycle; // cycle ebi timings
     uint32_t mode;  // ebi mode
+    uint8_t  num;
 };
 
 struct sk_fpga_data
@@ -198,6 +210,28 @@ public:
         ;
     }
 
+    bool SetAddrSpace(addr_selector sel)
+    {
+        assert((sel == addr_selector::FPGA_ADDR_CS0) || (sel == addr_selector::FPGA_ADDR_CS1));
+        uint8_t res = static_cast<uint8_t>(sel);
+        return(ioctl(m_fd, SKFPGA_IOSADDRSEL, &res) == -1);
+    }
+
+    addr_selector GetAddrSpace()
+    {
+        uint8_t sel = 0;
+        if (ioctl(m_fd, SKFPGA_IOGADDRSEL, &sel) == -1)
+        {
+            return addr_selector::FPGA_ADDR_UNDEFINED;
+        }
+        else
+        {
+            addr_selector selRes = static_cast<addr_selector>(sel);
+            assert((selRes == addr_selector::FPGA_ADDR_CS0) || (selRes == addr_selector::FPGA_ADDR_CS1));
+            return selRes;
+        }
+    }
+
     bool SetReset(bool reset)
     {
         uint8_t res = reset ? 1 : 0;
@@ -207,7 +241,7 @@ public:
     uint8_t GetReset()
     {
         uint8_t reset = -1;
-        if (!(ioctl(m_fd, SKFPGA_IOGRESET, &reset) == -1))
+        if (ioctl(m_fd, SKFPGA_IOGRESET, &reset) == -1)
         {
             return -1;
         }
@@ -223,10 +257,10 @@ public:
         return(ioctl(m_fd, SKFPGA_IOSHOSTIRQ, &res) == -1);
     }
 
-    bool GetHostToFpgaIrq()
+    uint8_t GetHostToFpgaIrq()
     {
         uint8_t val = -1;
-        if (!(ioctl(m_fd, SKFPGA_IOGHOSTIRQ, &val) == -1))
+        if (ioctl(m_fd, SKFPGA_IOGHOSTIRQ, &val) == -1)
         {
             return -1;
         }
@@ -236,16 +270,30 @@ public:
         }
     }
 
-    bool GetFpgaToHostIrq()
+    uint8_t GetFpgaToHostIrq()
     {
         uint8_t val = -1;
-        if (!(ioctl(m_fd, SKFPGA_IOGFPGAIRQ, &val) == -1))
+        if (ioctl(m_fd, SKFPGA_IOGFPGAIRQ, &val) == -1)
         {
             return -1;
         }
         else
         {
             return val;
+        }
+    }
+
+    void* Mmap()
+    {
+        void* mem = nullptr;
+        mem = mmap(nullptr, 0x3234, PROT_WRITE|PROT_READ, MAP_SHARED, m_fd, 0);
+        if (mem == MAP_FAILED) 
+        {
+            return nullptr;
+        }
+        else
+        {
+            return mem;
         }
     }
 
@@ -257,7 +305,7 @@ int main (int argc, char* argv[])
 {
     Fpga f("/dev/fpga");
     f.ProgramFpga("./simple_debug.bit");
-    sk_fpga_smc_timings timings = {0x01010101,0x0a0a0a0a, 0x000e000e, (0x3 | 1<<12)};
+    sk_fpga_smc_timings timings = {0x01010101,0x0a0a0a0a, 0x000e000e, (0x3 | 1<<12), 0};
     sk_fpga_smc_timings rTimings;
     // set smc timings
     f.SetTimings(&timings);
@@ -269,24 +317,39 @@ int main (int argc, char* argv[])
         fprintf(stderr, "Timings don't match\n");
         assert(0);
     }
-    // release reset
-    f.SetReset(true);
+    timings.num = 1;
+    f.SetTimings(&timings);
+    // read smc timings
+    f.GetTimings(&rTimings);
+    // compare smc timings
+    if (memcmp(&timings, &rTimings, sizeof(timings)))
+    {
+        fprintf(stderr, "Timings don't match\n");
+        assert(0);
+    }
+
     uint32_t sAddr = 0x2000;
     uint16_t sData = 0x1055;
+
+    // release reset
+    f.SetReset(true);
+    f.SetAddrSpace(addr_selector::FPGA_ADDR_CS1);
+    // Check non-RAM address, should return 16 bits of address requested
+    sk_fpga_data d  = {(sAddr + 64u), static_cast<uint16_t>(sData + 32u)};
+    f.ReadShort(&d);
+    fprintf(stderr, "Valid check: %x : %x\n", d.address, d.data);
+    fprintf(stderr, "CS1 bit %x\n", f.GetFpgaToHostIrq());
+    assert(d.data == d.address);
+
     // RAM is mapped to 0x2000 - 0x2040 addresses
     // Write 32 cells 16 bits
+    f.SetAddrSpace(addr_selector::FPGA_ADDR_CS0);
     for (uint16_t i = 0; i < 32*2; i+=2)
     {
         sk_fpga_data d  = {sAddr + i, static_cast<uint16_t>(sData + i)};
         f.WriteShort(&d);
         fprintf(stderr, "Writing %x : %x\n", sAddr + i, sData + i);
     }
-
-    // Check non-RAM address, should return 16 bits of address requested
-    sk_fpga_data d  = {(sAddr + 64u), static_cast<uint16_t>(sData + 32u)};
-    f.ReadShort(&d);
-    fprintf(stderr, "Valid check: %x : %x\n", d.address, d.data);
-    assert(d.data == d.address);
 
     // Verify written values
     for (uint16_t i = 0; i < 32 * 2; i+=2)
@@ -297,4 +360,12 @@ int main (int argc, char* argv[])
         assert(d.data == (sData + i));
     }
 
+    void* mem = f.Mmap();
+    fprintf(stderr, "Mmaped %x\n", *(uint16_t*)((uint8_t*)mem + (5 << 1)));
+
+    f.SetAddrSpace(addr_selector::FPGA_ADDR_CS0);
+    d  = {(sAddr + 64u), static_cast<uint16_t>(sData + 32u)};
+    f.ReadShort(&d);
+    fprintf(stderr, "Valid check: %x : %x\n", d.address, d.data);
+    assert(d.data == d.address);
 }

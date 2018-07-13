@@ -17,6 +17,7 @@ static const struct file_operations fpga_fops = {
         .write          = sk_fpga_write,
         .read           = sk_fpga_read,
         .unlocked_ioctl = sk_fpga_ioctl,
+        .mmap           = sk_fpga_mmap,
 };
 
 static struct miscdevice sk_fpga_dev = {
@@ -26,20 +27,15 @@ static struct miscdevice sk_fpga_dev = {
 };
 
 // FIXME: is it optimal way to calculate the pointer?
-// TODO: rework this function
 uint16_t* sk_fpga_ptr_by_addr (uint32_t addr)
 {
-    uint32_t rem = 0;
-    BUG_ON(addr >= fpga.fpga_mem_window_size * 2);
-    rem = (addr % fpga.fpga_mem_window_size);
-    if (addr / fpga.fpga_mem_window_size)
-    {
-        return (uint16_t*)((uint8_t*)fpga.fpga_mem_virt_start_cs1 + rem);
-    }
-    else
-    {
-        return (uint16_t*)((uint8_t*)fpga.fpga_mem_virt_start_cs0 + rem);
-    }
+    uint16_t* mem_start = NULL;
+    BUG_ON(addr >= fpga.fpga_mem_window_size);
+    BUG_ON(!(fpga.fpga_addr_sel == FPGA_ADDR_CS0) && !(fpga.fpga_addr_sel == FPGA_ADDR_CS1));
+    mem_start = (fpga.fpga_addr_sel == FPGA_ADDR_CS0) ? fpga.fpga_mem_virt_start_cs0 : fpga.fpga_mem_virt_start_cs1;
+    BUG_ON(mem_start == NULL);
+    BUG_ON(addr & 0x1);
+    return (mem_start + addr/sizeof(uint16_t));
 }
 
 static int sk_fpga_open (struct inode *inode, struct file *file)
@@ -77,8 +73,9 @@ static ssize_t sk_fpga_read (struct file *file, char __user *buf,
     uint16_t bytes_to_read = (TMP_BUF_SIZE < len) ? TMP_BUF_SIZE : len;
     uint16_t* start = sk_fpga_ptr_by_addr(fpga.address);
     // 2 since byte vs short
-    BUG_ON(bytes_to_read % 2);
-    for (; i < bytes_to_read; i += 2)
+    BUG_ON(bytes_to_read & 0x1);
+    BUG_ON((bytes_to_read + fpga.address) > fpga.fpga_mem_window_size);
+    for (; i < bytes_to_read; i += sizeof(uint16_t))
     {
         fpga.fpga_prog_buffer[i] = ioread16(start + i);
     }
@@ -94,11 +91,11 @@ static ssize_t sk_fpga_write(struct file *file, const char __user *buf,
     uint16_t* start = NULL;
     uint16_t bytes_to_copy = (TMP_BUF_SIZE < len) ? TMP_BUF_SIZE : len;
     int res = copy_from_user(fpga.fpga_prog_buffer, buf, bytes_to_copy);
-    fpga.transactionSize = bytes_to_copy;
     start = sk_fpga_ptr_by_addr(fpga.address);
+    BUG_ON((bytes_to_copy + fpga.address) > fpga.fpga_mem_window_size);
     // 2 since byte vs short
-    BUG_ON(bytes_to_copy % 2);
-    for (; i < bytes_to_copy; i += 2)
+    BUG_ON(bytes_to_copy & 0x1);
+    for (; i < bytes_to_copy; i += sizeof(uint16_t))
     {
         iowrite16(fpga.fpga_prog_buffer[i], start + i);
     }
@@ -133,6 +130,7 @@ static long sk_fpga_ioctl (struct file *f, unsigned int cmd, unsigned long arg)
     case SKFPGA_IOSDATA:
         if (copy_from_user(&data, (int __user *)arg, sizeof(struct sk_fpga_data)))
             return -EFAULT;
+        BUG_ON(data.address + sizeof(uint16_t) > fpga.fpga_mem_window_size);
         iowrite16(data.data, sk_fpga_ptr_by_addr(data.address));
         break;
 
@@ -140,15 +138,12 @@ static long sk_fpga_ioctl (struct file *f, unsigned int cmd, unsigned long arg)
     case SKFPGA_IOGDATA:
         if (copy_from_user(&data, (int __user *)arg, sizeof(struct sk_fpga_data)))
             return -EFAULT;
+        BUG_ON(data.address + sizeof(uint16_t) > fpga.fpga_mem_window_size);
         data.data = ioread16(sk_fpga_ptr_by_addr(data.address));
         if (copy_to_user((int __user *)arg, &data, sizeof(struct sk_fpga_data)))
             return -EFAULT;
         break;
 
-    // programm FPGA, flow:
-    // prepare to be programmed
-    // write buf - flush buf - repeat
-    // programming done
     case SKFPGA_IOSPROG:
         if (copy_from_user(fName, (int __user *)arg, sizeof(char)*PROG_FILE_NAME_LEN))
             return -EFAULT;
@@ -160,15 +155,7 @@ static long sk_fpga_ioctl (struct file *f, unsigned int cmd, unsigned long arg)
     case SKFPGA_IOSRESET:
         if (copy_from_user(&value, (int __user *)arg, sizeof(uint8_t)))
             return -EFAULT;
-        // FIXME: refactor?
-        if (value)
-        {
-            gpio_set_value(fpga.fpga_pins.fpga_reset, 1);
-        }
-        else
-        {
-            gpio_set_value(fpga.fpga_pins.fpga_reset, 0);
-        }
+        gpio_set_value(fpga.fpga_pins.fpga_reset, (value) ? 1 : 0);
         break;
 
     case SKFPGA_IOGRESET:
@@ -180,14 +167,7 @@ static long sk_fpga_ioctl (struct file *f, unsigned int cmd, unsigned long arg)
     case SKFPGA_IOSHOSTIRQ:
         if (copy_from_user(&value, (int __user *)arg, sizeof(uint8_t)))
             return -EFAULT;
-        if (value)
-        {
-            gpio_set_value(fpga.fpga_pins.host_irq, 1);
-        }
-        else
-        {
-            gpio_set_value(fpga.fpga_pins.host_irq, 0);
-        }
+        gpio_set_value(fpga.fpga_pins.host_irq, (value) ? 1 : 0);
         break;
     
     case SKFPGA_IOGHOSTIRQ:
@@ -202,7 +182,20 @@ static long sk_fpga_ioctl (struct file *f, unsigned int cmd, unsigned long arg)
     
     case SKFPGA_IOGFPGAIRQ:
         value = gpio_get_value(fpga.fpga_pins.fpga_irq);
+        printk(KERN_ALERT"GFPGAIRQ %x", value);
         if (copy_to_user((int __user *)arg, &value, sizeof(uint8_t)))
+            return -EFAULT;
+        break;
+
+    case SKFPGA_IOSADDRSEL:
+        if (copy_from_user(&value, (int __user *)arg, sizeof(uint8_t)))
+            return -EFAULT;
+        BUG_ON(!(value == FPGA_ADDR_CS0) && !(value == FPGA_ADDR_CS1));
+        fpga.fpga_addr_sel = value;
+        break;
+    
+    case SKFPGA_IOGADDRSEL:
+        if (copy_to_user((int __user *)arg, &fpga.fpga_addr_sel, sizeof(uint8_t)))
             return -EFAULT;
         break;
 
@@ -212,20 +205,46 @@ static long sk_fpga_ioctl (struct file *f, unsigned int cmd, unsigned long arg)
     return ret;
 }
 
+// TODO: fix dtb to avoid such hacks
+int sk_fpga_setup_ebicsa (void)
+{
+    int ret = -EIO;
+    uint32_t __iomem* matrix = NULL;
+    uint32_t __iomem* ebicsa = NULL;
+    uint32_t cur_ebicsa = 0;
+
+    if (!request_mem_region(MATRIX_ADDRESS, MATRIX_ADDRESS_WINDOW, "sk_fpga_matrix")) 
+    {
+        printk(KERN_ALERT"Failed to request mem region for matrix\n");
+        return ret;
+    }
+    matrix = ioremap(MATRIX_ADDRESS, MATRIX_ADDRESS_WINDOW);
+    if (!matrix) 
+    {
+        printk(KERN_ALERT"Failed to ioremap mem region for matrix\n");
+        release_mem_region(MATRIX_ADDRESS, MATRIX_ADDRESS_WINDOW);
+        return ret;
+    }
+    ebicsa = matrix + EBICSA_OFFSET/sizeof(uint32_t);
+    cur_ebicsa = ioread32(ebicsa);
+    cur_ebicsa &= ~EBICSA_CS1_MASK;
+    iowrite32(cur_ebicsa, ebicsa);
+
+    iounmap(matrix);
+    release_mem_region(MATRIX_ADDRESS, MATRIX_ADDRESS_WINDOW);
+
+    return 0;    
+}
+
 // TODO: reuse existing atmel ebi interfaces and data from dtb
 int sk_fpga_setup_smc (void)
 {
     int ret = -EIO;
     uint32_t __iomem* smc = NULL;
 
-    uint32_t __iomem* ADDR_SETUP = NULL;
-    uint32_t __iomem* ADDR_PULSE = NULL;
-    uint32_t __iomem* ADDR_CYCLE = NULL;
-    uint32_t __iomem* ADDR_MODE  = NULL;
-
     if (!request_mem_region(SMC_ADDRESS, SMC_ADDRESS_WINDOW, "sk_fpga_smc0")) 
     {
-        printk(KERN_ALERT"Failed to request mem region for smd\n");
+        printk(KERN_ALERT"Failed to request mem region for smc\n");
         return ret;
     }
     smc = ioremap(SMC_ADDRESS, SMC_ADDRESS_WINDOW);
@@ -236,18 +255,14 @@ int sk_fpga_setup_smc (void)
         return ret;
     }
 
-    ADDR_SETUP = smc;
-    ADDR_PULSE = smc + 1;
-    ADDR_CYCLE = smc + 2;
-    ADDR_MODE  = smc + 3;
+    iowrite32(fpga.smc_timings.setup, SMC_SETUP(smc, fpga.smc_timings.num));
+    iowrite32(fpga.smc_timings.pulse, SMC_PULSE(smc, fpga.smc_timings.num));
+    iowrite32(fpga.smc_timings.cycle, SMC_CYCLE(smc, fpga.smc_timings.num));
+    iowrite32(fpga.smc_timings.mode, SMC_MODE(smc, fpga.smc_timings.num));
 
-    iowrite32(fpga.smc_timings.setup, ADDR_SETUP);
-    iowrite32(fpga.smc_timings.pulse, ADDR_PULSE);
-    iowrite32(fpga.smc_timings.cycle, ADDR_CYCLE);
-    iowrite32(fpga.smc_timings.mode, ADDR_MODE);
- 
     iounmap(smc);
     release_mem_region(SMC_ADDRESS, SMC_ADDRESS_WINDOW);
+   
     return 0;    
 }
 
@@ -257,14 +272,9 @@ int sk_fpga_read_smc (void)
     int ret = -EIO;
     uint32_t __iomem* smc = NULL;
 
-    uint32_t __iomem* ADDR_SETUP = NULL;
-    uint32_t __iomem* ADDR_PULSE = NULL;
-    uint32_t __iomem* ADDR_CYCLE = NULL;
-    uint32_t __iomem* ADDR_MODE  = NULL;
-
     if (!request_mem_region(SMC_ADDRESS, SMC_ADDRESS_WINDOW, "sk_fpga_smc0")) 
     {
-        printk(KERN_ALERT"Failed to request mem region for smd\n");
+        printk(KERN_ALERT"Failed to request mem region for smc\n");
         return ret;
     }
 
@@ -276,16 +286,11 @@ int sk_fpga_read_smc (void)
         return ret;
     }
 
-    ADDR_SETUP = smc;
-    ADDR_PULSE = smc + 1;
-    ADDR_CYCLE = smc + 2;
-    ADDR_MODE  = smc + 3;
+    fpga.smc_timings.setup = ioread32(SMC_SETUP(smc, fpga.smc_timings.num));
+    fpga.smc_timings.pulse = ioread32(SMC_PULSE(smc, fpga.smc_timings.num));
+    fpga.smc_timings.cycle = ioread32(SMC_CYCLE(smc, fpga.smc_timings.num));
+    fpga.smc_timings.mode  = ioread32(SMC_MODE(smc, fpga.smc_timings.num));
 
-    fpga.smc_timings.setup = ioread32(ADDR_SETUP);
-    fpga.smc_timings.pulse = ioread32(ADDR_PULSE);
-    fpga.smc_timings.cycle = ioread32(ADDR_CYCLE);
-    fpga.smc_timings.mode  = ioread32(ADDR_MODE);
- 
     iounmap(smc);
     release_mem_region(SMC_ADDRESS, SMC_ADDRESS_WINDOW);
     return 0;    
@@ -295,7 +300,7 @@ int sk_fpga_read_smc (void)
 int sk_fpga_fill_structure(struct platform_device *pdev)
 {
     int ret = -EIO;
-    
+
     // get FPGA clk source
     fpga.fpga_clk = devm_clk_get(&pdev->dev, "mclk");
     if (IS_ERR(fpga.fpga_clk)) 
@@ -516,9 +521,18 @@ static int sk_fpga_probe (struct platform_device *pdev)
         goto release_host_irq_pin;
     }
 
+    ret = sk_fpga_setup_ebicsa();
+    if (ret)
+    {
+        printk(KERN_ALERT"Failed to setup bux matrix");
+        ret = -EIO;
+        goto release_host_irq_pin;
+    }
+
     // device is not yet opened
     fpga.opened = 0;
-
+    fpga.fpga_addr_sel = FPGA_ADDR_UNDEFINED;
+    
     return ret;
 
 release_host_irq_pin:
@@ -634,12 +648,14 @@ int sk_fpga_programming_done (void)
     done = gpio_get_value(fpga.fpga_pins.fpga_done);
     counter = 0;
     // toggle fpga clock while done signal appears
-    while (!done) {
+    while (!done) 
+    {
         gpio_set_value(fpga.fpga_pins.fpga_cclk, 1);
         gpio_set_value(fpga.fpga_pins.fpga_cclk, 0);
         done = gpio_get_value(fpga.fpga_pins.fpga_done);
         counter++;
-        if (counter > MAX_WAIT_COUNTER) {
+        if (counter > MAX_WAIT_COUNTER) 
+        {
             printk(KERN_ALERT"Failed to get FPGA done pin as high");
             ret = -EIO;
             // might want to set it to undefined
@@ -647,7 +663,8 @@ int sk_fpga_programming_done (void)
         }
     }
     // toggle clock a little bit just to ensure nothing's wrong
-    for (i = 0; i < 10; i++) {
+    for (i = 0; i < 10; i++) 
+    {
         gpio_set_value(fpga.fpga_pins.fpga_cclk, 1);
         gpio_set_value(fpga.fpga_pins.fpga_cclk, 0);
     }
@@ -700,6 +717,30 @@ int sk_fpga_prog (char* fName)
         return -ENODEV;
     }
 
+    return ret;
+}
+
+static int sk_fpga_mmap (struct file *file, struct vm_area_struct * vma)
+{
+    //NOTE: we should really protect these by mutexes and stuff...
+    unsigned long start      = (fpga.fpga_addr_sel == FPGA_ADDR_CS0) ? fpga.fpga_mem_phys_start_cs0 : fpga.fpga_mem_phys_start_cs1;
+    unsigned long len        = fpga.fpga_mem_window_size;
+    unsigned long mmio_pgoff = PAGE_ALIGN((start & ~PAGE_MASK) + len) >> PAGE_SHIFT;
+    int ret = 0;
+    if (vma->vm_pgoff >= mmio_pgoff) 
+    {
+        vma->vm_pgoff -= mmio_pgoff;
+    }
+
+    vma->vm_page_prot = vm_get_page_prot(vma->vm_flags);
+
+    //io_remap_pfn_range call...
+    ret = vm_iomap_memory(vma, start, len);
+    if (ret) 
+    {
+        printk(KERN_ALERT"fpga mmap failed :(\n");
+        return ret;
+    }
     return ret;
 }
 
