@@ -14,6 +14,7 @@
 
 #include <cassert>
 #include <cerrno>
+#include <ctime>
 
 // TODO: merge ioctl defines with ones in kernel
 #define SKFP_IOC_MAGIC 0x81
@@ -283,29 +284,45 @@ public:
         }
     }
 
-    void* Mmap()
+    bool Mmap()
     {
-        void* mem = nullptr;
-        mem = mmap(nullptr, 0x3234, PROT_WRITE|PROT_READ, MAP_SHARED, m_fd, 0);
-        if (mem == MAP_FAILED) 
+        addr_selector curSel = GetAddrSpace();
+        SetAddrSpace(addr_selector::FPGA_ADDR_CS0);
+        m_mmapCs0 = static_cast<uint16_t*>(mmap(nullptr, (1 << 25), PROT_WRITE|PROT_READ, MAP_SHARED, m_fd, 0));
+        SetAddrSpace(addr_selector::FPGA_ADDR_CS1);
+        m_mmapCs1 = static_cast<uint16_t*>(mmap(nullptr, (1 << 25), PROT_WRITE|PROT_READ, MAP_SHARED, m_fd, 0));
+        SetAddrSpace(curSel);
+        if ((m_mmapCs0 == MAP_FAILED) || (m_mmapCs1 == MAP_FAILED)) 
         {
-            return nullptr;
+            return true;
         }
         else
         {
-            return mem;
+            return false;
         }
+    }
+
+    uint16_t* GetFpgaMemCs0()
+    {
+        return m_mmapCs0;
+    }
+
+    uint16_t* GetFpgaMemCs1()
+    {
+        return m_mmapCs1;
     }
 
 private:
     int m_fd = -EFAULT;
+    uint16_t* m_mmapCs0 = nullptr;
+    uint16_t* m_mmapCs1 = nullptr;
 };
 
 int main (int argc, char* argv[])
 {
     Fpga f("/dev/fpga");
     f.ProgramFpga("./simple_debug.bit");
-    sk_fpga_smc_timings timings = {0x01010101,0x0a0a0a0a, 0x000e000e, (0x3 | 1<<12), 0};
+    sk_fpga_smc_timings timings = {0x01010101, 0x05050505, 0x00080008, (0x3 | 1<<12), 0};
     sk_fpga_smc_timings rTimings;
     // set smc timings
     f.SetTimings(&timings);
@@ -339,7 +356,7 @@ int main (int argc, char* argv[])
     f.ReadShort(&d);
     fprintf(stderr, "Valid check: %x : %x\n", d.address, d.data);
     fprintf(stderr, "CS1 bit %x\n", f.GetFpgaToHostIrq());
-    assert(d.data == d.address);
+    assert(d.data == (d.address | 1));
 
     // RAM is mapped to 0x2000 - 0x2040 addresses
     // Write 32 cells 16 bits
@@ -360,8 +377,24 @@ int main (int argc, char* argv[])
         assert(d.data == (sData + i));
     }
 
-    void* mem = f.Mmap();
-    fprintf(stderr, "Mmaped %x\n", *(uint16_t*)((uint8_t*)mem + (5 << 1)));
+    if (f.Mmap())
+    {
+        assert(0);
+    }
+
+    clock_t begin = clock();
+    uint16_t* cs1 = f.GetFpgaMemCs1();
+    volatile uint16_t readVal = 0;;
+    for (int i = 0; i < (1 << 25) / sizeof(uint16_t); i++)
+    {
+        readVal = *cs1;
+        uint16_t expectedVal = static_cast<uint16_t>(i << 1) | 1;
+        assert(readVal == expectedVal);
+        cs1++;
+    }
+    clock_t end = clock();
+    double elapsed_secs = double(end - begin) / CLOCKS_PER_SEC;
+    fprintf(stderr, "Reading %x bytes, %d transactions in %f seconds at %lx clocks_per_sec: %f mb/s\n", (1 << 25), (1 << 25) / sizeof(uint16_t), elapsed_secs, CLOCKS_PER_SEC, ((1 << 25) / 1024 / 1024 / elapsed_secs));
 
     f.SetAddrSpace(addr_selector::FPGA_ADDR_CS0);
     d  = {(sAddr + 64u), static_cast<uint16_t>(sData + 32u)};

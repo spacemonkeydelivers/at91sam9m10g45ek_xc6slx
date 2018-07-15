@@ -182,7 +182,6 @@ static long sk_fpga_ioctl (struct file *f, unsigned int cmd, unsigned long arg)
     
     case SKFPGA_IOGFPGAIRQ:
         value = gpio_get_value(fpga.fpga_pins.fpga_irq);
-        printk(KERN_ALERT"GFPGAIRQ %x", value);
         if (copy_to_user((int __user *)arg, &value, sizeof(uint8_t)))
             return -EFAULT;
         break;
@@ -723,19 +722,19 @@ int sk_fpga_prog (char* fName)
 static int sk_fpga_mmap (struct file *file, struct vm_area_struct * vma)
 {
     //NOTE: we should really protect these by mutexes and stuff...
-    unsigned long start      = (fpga.fpga_addr_sel == FPGA_ADDR_CS0) ? fpga.fpga_mem_phys_start_cs0 : fpga.fpga_mem_phys_start_cs1;
-    unsigned long len        = fpga.fpga_mem_window_size;
-    unsigned long mmio_pgoff = PAGE_ALIGN((start & ~PAGE_MASK) + len) >> PAGE_SHIFT;
+    // Ignoring pgoff to determine start of mmap
     int ret = 0;
-    if (vma->vm_pgoff >= mmio_pgoff) 
-    {
-        vma->vm_pgoff -= mmio_pgoff;
-    }
+    unsigned long start = (fpga.fpga_addr_sel == FPGA_ADDR_CS0) ? (fpga.fpga_mem_phys_start_cs0 >> PAGE_SHIFT) : (fpga.fpga_mem_phys_start_cs1 >> PAGE_SHIFT);
+    // (vm_end - vm_start) should be equal to window size
+    unsigned long len   = (vma->vm_end - vma->vm_start);
+    BUG_ON(vma->vm_pgoff);
+    BUG_ON(fpga.fpga_mem_window_size != (vma->vm_end - vma->vm_start));
 
-    vma->vm_page_prot = vm_get_page_prot(vma->vm_flags);
+    // mark these pages as IO
+    vma->vm_page_prot = vm_get_page_prot(vma->vm_flags | VM_IO);
 
     //io_remap_pfn_range call...
-    ret = vm_iomap_memory(vma, start, len);
+    ret = io_remap_pfn_range(vma, vma->vm_start, start, len, vma->vm_page_prot);
     if (ret) 
     {
         printk(KERN_ALERT"fpga mmap failed :(\n");

@@ -64,7 +64,7 @@ module simple_debug(
    parameter RAM_SIZE = 32;
    parameter RAM_SIZE_LOG2 = 5;
    // x2 since we're addressing by 16 bits
-   wire ram_accessed = ((addr_i >= RAM_ADDRESS_START) && (addr_i < (RAM_ADDRESS_START + RAM_SIZE*2))) ? 1 : 0;
+   wire ram_accessed = (({cs_i[0], addr_i} >= RAM_ADDRESS_START) && ({cs_i[0], addr_i} < (RAM_ADDRESS_START + RAM_SIZE*2))) ? 1 : 0;
 
    wire [DATA_WIDTH - 1:0] ram_d;
    // TODO: use proper log2()
@@ -114,8 +114,8 @@ module simple_debug(
                end
                else
                begin
-                  // skip LSB due to 16 bit data transactions
-                  data_from_iface <= addr_i[DATA_WIDTH - 1:0];
+                  // LSB of address is 0 due to 16 bit data transactions, so add cs
+                  data_from_iface <= (addr_i[DATA_WIDTH - 1:0] | cs_i[0]);
                end
             end
             // get data to fpga
