@@ -322,7 +322,7 @@ int main (int argc, char* argv[])
 {
     Fpga f("/dev/fpga");
     f.ProgramFpga("./simple_debug.bit");
-    sk_fpga_smc_timings timings = {0x01010101, 0x05050505, 0x00080008, (0x3 | 1<<12), 0};
+    sk_fpga_smc_timings timings = {0x00000000, 0x04040404, 0x00050005, (0x3 | 1<<12), 0};
     sk_fpga_smc_timings rTimings;
     // set smc timings
     f.SetTimings(&timings);

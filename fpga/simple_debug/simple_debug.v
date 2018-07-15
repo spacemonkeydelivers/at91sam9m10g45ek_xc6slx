@@ -81,7 +81,7 @@ module simple_debug(
 
    // becomes true if chip select was switched from low to high
    wire iface_accessed = {stage_2, stage_3} == `CHIP_SELECT_LOW_TO_HIGH;
-   // wire iface_accessed = !chip_select;
+   //wire iface_accessed = !chip_select;
 
    always @ (posedge clk_i) 
    begin
