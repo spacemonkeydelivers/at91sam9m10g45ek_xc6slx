@@ -24,6 +24,7 @@
 
 #include <linux/kernel.h>
 #include <linux/time.h>
+#include <linux/dmaengine.h>
 #include <linux/rtc.h>
 #include <linux/ioctl.h>
 #include <linux/platform_data/atmel.h>
@@ -33,6 +34,9 @@
 #include <linux/delay.h>
 #include <linux/clk.h>
 #include <linux/of_gpio.h>
+
+#include <linux/dma-mapping.h>
+#include <linux/dmaengine.h>
 
 
 #include <linux/module.h>  // Needed by all modules
@@ -127,6 +131,14 @@ struct sk_fpga
     struct clk* fpga_clk;
     uint32_t    fpga_freq;
     enum addr_selector fpga_addr_sel;
+
+    struct dma_chan* fpga_dma_chan_tx;
+    struct dma_chan* fpga_dma_chan_rx;
+    dma_addr_t  dma_addr_rx_bbuf;
+    dma_addr_t  dma_addr_tx_bbuf;
+    void        *addr_rx_bbuf;
+    void        *addr_tx_bbuf;
+
 };
 
 // Maybe we want to hide some of these functions
@@ -148,6 +160,7 @@ int sk_fpga_programming_done   (void);
 void sk_fpga_program (const uint8_t* buff, uint32_t bufLen);
 int sk_fpga_prog(char* fName);
 static int sk_fpga_mmap (struct file *file, struct vm_area_struct * vma);
+int sk_fpga_setup_dma (struct platform_device *pdev);
 
 
 

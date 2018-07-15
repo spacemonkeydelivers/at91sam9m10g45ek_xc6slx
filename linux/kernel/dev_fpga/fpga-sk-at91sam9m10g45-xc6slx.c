@@ -531,6 +531,12 @@ static int sk_fpga_probe (struct platform_device *pdev)
     // device is not yet opened
     fpga.opened = 0;
     fpga.fpga_addr_sel = FPGA_ADDR_UNDEFINED;
+
+    ret = sk_fpga_setup_dma(pdev);
+    if (ret)
+    {
+        goto release_host_irq_pin;
+    }
     
     return ret;
 
@@ -555,6 +561,114 @@ misc_dereg:
     return ret;
 }
 
+int sk_fpga_setup_dma (struct platform_device *pdev)
+{
+    struct dma_slave_config	slave_config;
+    struct device *dev = &pdev->dev;
+    int err = 0;
+
+    // let's do DMA stuff
+    dma_cap_mask_t mask;
+    dma_cap_zero(mask);
+    dma_cap_set(DMA_SLAVE, mask);
+    
+    dmaengine_get();
+
+    fpga.fpga_dma_chan_tx = dma_request_slave_channel_reason(dev, "tx");
+    if (IS_ERR(fpga.fpga_dma_chan_tx)) 
+    {
+        err = PTR_ERR(fpga.fpga_dma_chan_tx);
+        if (err == -EPROBE_DEFER) 
+        {
+            dev_warn(dev, "no DMA channel available at the moment\n");
+            goto release_tx_chan;
+        }
+        dev_err(dev, "DMA TX channel not available, SPI unable to use DMA\n");
+        err = -EBUSY;
+        goto release_tx_chan;
+    }
+
+    fpga.fpga_dma_chan_rx = dma_request_slave_channel(dev, "rx");
+    if (IS_ERR(fpga.fpga_dma_chan_rx))
+    {
+        err = PTR_ERR(fpga.fpga_dma_chan_rx);
+        if (err == -EPROBE_DEFER) 
+        {
+            dev_warn(dev, "no DMA channel available at the moment\n");
+            err = -EBUSY;
+            goto release_rx_chan;
+        }
+        dev_err(dev, "DMA RX channel not available, SPI unable to use DMA\n");
+        err = -EBUSY;
+        goto release_rx_chan;
+    }
+
+    //err = atmel_spi_dma_slave_config(as, &slaive_config, 8);
+    slave_config.dst_addr_width = DMA_SLAVE_BUSWIDTH_2_BYTES;
+    slave_config.src_addr_width = DMA_SLAVE_BUSWIDTH_2_BYTES;
+
+    slave_config.dst_addr = 0;
+    slave_config.src_addr = 0;
+    slave_config.src_maxburst = 1;
+    slave_config.dst_maxburst = 1;
+    slave_config.device_fc = false;
+
+    slave_config.direction = DMA_MEM_TO_DEV;
+    if (dmaengine_slave_config(fpga.fpga_dma_chan_tx, &slave_config)) 
+    {
+        dev_err(&pdev->dev, "failed to configure tx dma channel\n");
+        err = -EINVAL;
+        goto release_rx_chan;
+    }
+
+    slave_config.direction = DMA_DEV_TO_MEM;
+    if (dmaengine_slave_config(fpga.fpga_dma_chan_rx, &slave_config)) 
+    {
+        dev_err(&pdev->dev, "failed to configure rx dma channel\n");
+        err = -EINVAL;
+        goto release_rx_chan;
+    }
+
+    dev_info(&pdev->dev,
+             "Using %s (tx) and %s (rx) for DMA transfers\n",
+             dma_chan_name(fpga.fpga_dma_chan_tx),
+             dma_chan_name(fpga.fpga_dma_chan_rx));
+
+    // allocate buffers
+
+    fpga.addr_tx_bbuf = dma_alloc_coherent(&pdev->dev, 65535, &fpga.dma_addr_tx_bbuf, GFP_KERNEL | GFP_DMA);
+    if (!fpga.addr_tx_bbuf) 
+    {
+        dma_free_coherent(&pdev->dev, 65535, fpga.addr_rx_bbuf, fpga.dma_addr_rx_bbuf);
+        err = -ENOMEM;
+        goto release_rx_chan;
+    }
+    
+    fpga.addr_rx_bbuf = dma_alloc_coherent(&pdev->dev, 65535, &fpga.dma_addr_rx_bbuf, GFP_KERNEL | GFP_DMA);
+    if (!fpga.addr_rx_bbuf) 
+    {
+        dma_free_coherent(&pdev->dev, 65535, fpga.addr_rx_bbuf, fpga.dma_addr_rx_bbuf);
+        err = -ENOMEM;
+        goto release_rx_chan;
+    }
+
+    return err;
+
+release_rx_chan:
+    if (!IS_ERR(fpga.fpga_dma_chan_rx))
+    {
+        dma_release_channel(fpga.fpga_dma_chan_rx);
+    }
+release_tx_chan:
+    if (!IS_ERR(fpga.fpga_dma_chan_tx))
+    {
+        dma_release_channel(fpga.fpga_dma_chan_tx);
+    }
+    fpga.fpga_dma_chan_tx = fpga.fpga_dma_chan_rx = NULL;
+    dmaengine_put();
+    return err;
+}
+
 static int sk_fpga_remove (struct platform_device *pdev)
 {
     printk(KERN_ALERT"Removing FPGA driver for SK-AT91SAM9M10G45EK-XC6SLX\n");
@@ -567,6 +681,11 @@ static int sk_fpga_remove (struct platform_device *pdev)
     gpio_free(fpga.fpga_pins.fpga_reset);
     gpio_free(fpga.fpga_pins.fpga_irq);
     gpio_free(fpga.fpga_pins.host_irq);
+    dma_free_coherent(&pdev->dev, 65535, fpga.addr_rx_bbuf, fpga.dma_addr_rx_bbuf);
+    dma_free_coherent(&pdev->dev, 65535, fpga.addr_tx_bbuf, fpga.dma_addr_tx_bbuf);
+    dma_release_channel(fpga.fpga_dma_chan_rx);
+    dma_release_channel(fpga.fpga_dma_chan_tx);
+    dmaengine_put();
     return 0;
 }
 

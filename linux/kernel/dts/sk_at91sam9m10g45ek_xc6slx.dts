@@ -295,6 +295,8 @@
 				atmel,smc-nrd-cycle-ns = <10>;
 				atmel,smc-nwe-cycle-ns = <10>;
 				atmel,smc-tdf-ns = <0>;
+                                dmas = <&dma 1 0>, <&dma 1 1>;
+                                dma-names = "rx", "tx";
 				/* clock stuff might be depricated */
 				clocks = <&pck0>;
 				clock-names = "mclk";
