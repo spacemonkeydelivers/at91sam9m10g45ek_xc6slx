@@ -38,6 +38,10 @@
 #include <linux/dma-mapping.h>
 #include <linux/dmaengine.h>
 
+#include <asm/siginfo.h>    //siginfo
+#include <linux/rcupdate.h> //rcu_read_lock
+#include <linux/sched.h>    //find_task_by_pid_type
+#include <linux/sched/signal.h>    //find_task_by_pid_type
 
 #include <linux/module.h>  // Needed by all modules
 #include <linux/kernel.h>  // Needed for KERN_INFO
@@ -77,6 +81,7 @@
 #define DEBUG
 
 #define TMP_BUF_SIZE 4096
+#define DMA_BUF_SIZE 65536
 #define PROG_FILE_NAME_LEN 256
 #define MAX_WAIT_COUNTER 8*2048
 
@@ -85,7 +90,23 @@ enum addr_selector
     FPGA_ADDR_UNDEFINED = 0,
     FPGA_ADDR_CS0,
     FPGA_ADDR_CS1,
+    FPGA_ADDR_DMA,
     FPGA_ADDR_LAST,
+};
+
+enum dma_dir
+{
+    DMA_ARM_TO_FPGA,
+    DMA_FPGA_TO_ARM,
+    DMA_LAST,
+};
+
+struct sk_fpga_dma_transaction
+{
+    uint32_t addr;
+    uint32_t len;
+    uint8_t  dir;
+    uint8_t  sync;
 };
 
 struct sk_fpga_smc_timings
@@ -132,12 +153,11 @@ struct sk_fpga
     uint32_t    fpga_freq;
     enum addr_selector fpga_addr_sel;
 
-    struct dma_chan* fpga_dma_chan_tx;
-    struct dma_chan* fpga_dma_chan_rx;
-    dma_addr_t  dma_addr_rx_bbuf;
-    dma_addr_t  dma_addr_tx_bbuf;
-    void        *addr_rx_bbuf;
-    void        *addr_tx_bbuf;
+    struct dma_chan* fpga_dma_chan;
+    dma_addr_t  dma_addr_buf;
+    void*       dma_buf;
+    int pid;
+    int irq_num;
 
 };
 
@@ -161,6 +181,12 @@ void sk_fpga_program (const uint8_t* buff, uint32_t bufLen);
 int sk_fpga_prog(char* fName);
 static int sk_fpga_mmap (struct file *file, struct vm_area_struct * vma);
 int sk_fpga_setup_dma (struct platform_device *pdev);
+int sk_fpga_dma_config_slave (void);
+int sk_fpga_do_dma_transfer (struct sk_fpga_dma_transaction* tran);
+void sk_fpga_dma_callback (void);
+int sk_fpga_unregister_irq (void);
+int sk_fpga_register_irq (void);
+irqreturn_t sk_fpga_irq_handler (int irq, void *dev_id);
 
 
 
@@ -186,12 +212,14 @@ int sk_fpga_setup_dma (struct platform_device *pdev);
 // TODO: implement later
 // ioctl to set fpga-to-arm as irq
 #define SKFPGA_IOSFPGAIRQ _IOR(SKFP_IOC_MAGIC, 10, uint8_t)
-// ioctl to get fpga-to-arm pin level
-#define SKFPGA_IOGFPGAIRQ _IOR(SKFP_IOC_MAGIC, 11, uint8_t)
 // ioctl to set address space selector
 #define SKFPGA_IOSADDRSEL _IOR(SKFP_IOC_MAGIC, 12, uint8_t)
 // ioctl to get address space selector
 #define SKFPGA_IOGADDRSEL _IOR(SKFP_IOC_MAGIC, 13, uint8_t)
+// ioctl to start DMA transaction
+#define SKFPGA_IOSDMA _IOR(SKFP_IOC_MAGIC, 14, struct sk_fpga_dma_transaction)
+// ioctl to set pid
+#define SKFPGA_IOSPID _IOR(SKFP_IOC_MAGIC, 15, int)
 
 // ioctl to set the current mode for the FPGA
 //#define SKFPGA_IOSMODE _IOR(SKFP_IOC_MAGIC, 3, int)

@@ -108,6 +108,9 @@ static long sk_fpga_ioctl (struct file *f, unsigned int cmd, unsigned long arg)
     struct sk_fpga_data data = {0};
     uint8_t value = 0;
     char fName[256] = {0};
+    struct sk_fpga_dma_transaction dma_tran = {0};
+    int pid = 0;
+
     switch (cmd)
     {
     // set current fpga ebi timings
@@ -177,19 +180,24 @@ static long sk_fpga_ioctl (struct file *f, unsigned int cmd, unsigned long arg)
         break;
 
     case SKFPGA_IOSFPGAIRQ:
-        printk(KERN_ALERT"TODO: implement registering irq handler later");
-        break;
-    
-    case SKFPGA_IOGFPGAIRQ:
-        value = gpio_get_value(fpga.fpga_pins.fpga_irq);
-        if (copy_to_user((int __user *)arg, &value, sizeof(uint8_t)))
+        if (copy_from_user(&value, (int __user *)arg, sizeof(uint8_t)))
             return -EFAULT;
+        if (value)
+        {
+            if (sk_fpga_register_irq())
+                return -EFAULT;
+        }
+        else
+        {
+            if (sk_fpga_unregister_irq())
+                return -EFAULT;
+        }
         break;
 
     case SKFPGA_IOSADDRSEL:
         if (copy_from_user(&value, (int __user *)arg, sizeof(uint8_t)))
             return -EFAULT;
-        BUG_ON(!(value == FPGA_ADDR_CS0) && !(value == FPGA_ADDR_CS1));
+        BUG_ON(!(value == FPGA_ADDR_CS0) && !(value == FPGA_ADDR_CS1) && !(value == FPGA_ADDR_DMA));
         fpga.fpga_addr_sel = value;
         break;
     
@@ -198,10 +206,60 @@ static long sk_fpga_ioctl (struct file *f, unsigned int cmd, unsigned long arg)
             return -EFAULT;
         break;
 
+    case SKFPGA_IOSDMA:
+        if (copy_from_user(&dma_tran, (int __user *)arg, sizeof(struct sk_fpga_dma_transaction)))
+            return -EFAULT;
+        BUG_ON(dma_tran.addr & 0x1);
+        if (sk_fpga_dma_config_slave())
+            return -EFAULT;
+        if (sk_fpga_do_dma_transfer(&dma_tran))
+            return -EIO;
+        break;
+
+    case SKFPGA_IOSPID:
+        if (copy_from_user(&pid, (int __user *)arg, sizeof(int)))
+            return -EFAULT;
+        fpga.pid = pid;
+        break;
+
     default:
         return -ENOTTY;
     }
     return ret;
+}
+
+int sk_fpga_do_dma_transfer (struct sk_fpga_dma_transaction* tran)
+{
+    int err = 0;
+    enum dma_status status;
+    struct dma_async_tx_descriptor* dma_desc;
+    dma_cookie_t        dma_cookie;
+    
+    dma_desc = dmaengine_prep_dma_memcpy(fpga.fpga_dma_chan,
+                                         ((enum dma_dir)tran->dir == DMA_ARM_TO_FPGA) ? tran->addr : fpga.dma_addr_buf,
+                                         ((enum dma_dir)tran->dir == DMA_ARM_TO_FPGA) ? fpga.dma_addr_buf : tran->addr,
+                                         tran->len,
+                                         DMA_PREP_INTERRUPT | DMA_CTRL_ACK);
+
+    // register callback only in case of async transfer?
+    dma_desc->callback = (void*)sk_fpga_dma_callback;
+    dma_cookie = dmaengine_submit(dma_desc);
+    if (dma_submit_error(dma_cookie))
+    {
+        printk(KERN_ALERT"Failed to submit dma transfer");
+        BUG_ON(1);
+    }
+    dma_async_issue_pending(fpga.fpga_dma_chan);
+    if (tran->sync)
+    {
+        status = dma_wait_for_async_tx(dma_desc);
+        if (status != DMA_COMPLETE)
+        {
+            printk(KERN_ALERT"DMA tranfer failed with status %d", status);
+            dmaengine_terminate_async(fpga.fpga_dma_chan);
+        }
+    }
+    return err;
 }
 
 // TODO: fix dtb to avoid such hacks
@@ -263,6 +321,95 @@ int sk_fpga_setup_smc (void)
     release_mem_region(SMC_ADDRESS, SMC_ADDRESS_WINDOW);
    
     return 0;    
+}
+
+int sk_fpga_register_irq (void)
+{
+    int ret = 0;
+    fpga.irq_num = gpio_to_irq(fpga.fpga_pins.fpga_irq);
+    if (!fpga.irq_num)
+    {
+        printk(KERN_ALERT"Failed to obtain irq number");
+        return -EFAULT;
+    }
+    ret = request_irq(fpga.irq_num,
+                      (irq_handler_t)sk_fpga_irq_handler,
+                      IRQ_TYPE_EDGE_BOTH,
+                      "sk_fpga_irq",
+                      NULL);
+    if (ret)
+    {
+        printk(KERN_ALERT"Failed to register irq");
+        fpga.irq_num = 0;
+        return ret;
+    }
+    return ret;
+}
+
+int sk_fpga_unregister_irq (void)
+{
+    free_irq(fpga.irq_num, NULL);
+    fpga.irq_num = 0;
+    return 0;
+}
+
+irqreturn_t sk_fpga_irq_handler (int irq, void *dev_id)
+{
+    int ret = 0;
+
+    struct task_struct* current_task = NULL;
+    struct siginfo info;
+
+    // for some reason irq happens right after registering
+    if (!gpio_get_value(fpga.fpga_pins.fpga_irq))
+        return IRQ_HANDLED;
+
+    // clear irq pin!!
+    uint8_t curSel = fpga.fpga_addr_sel;
+    fpga.fpga_addr_sel = FPGA_ADDR_CS0;
+    iowrite16(0, sk_fpga_ptr_by_addr(0));
+    fpga.fpga_addr_sel = curSel;
+
+    memset(&info, 0, sizeof(struct siginfo));
+    info.si_signo = SIGUSR2;
+    info.si_code = 0;
+    info.si_int = 0;
+    if (current_task == NULL)
+    {
+        rcu_read_lock();
+        current_task = pid_task(find_vpid(fpga.pid), PIDTYPE_PID);
+        rcu_read_unlock();
+    }
+    ret = send_sig_info(SIGUSR2, &info, current_task);
+    if (ret < 0) 
+    {
+        printk(KERN_ALERT"Failed to send a signal");
+        BUG_ON(1);
+    }
+    return IRQ_HANDLED;
+}
+
+void sk_fpga_dma_callback (void)
+{
+    int ret = 0;
+    struct task_struct* current_task = NULL;
+    struct siginfo info;
+    memset(&info, 0, sizeof(struct siginfo));
+    info.si_signo = SIGUSR1;
+    info.si_code = 0;
+    info.si_int = 0;
+    if (current_task == NULL)
+    {
+        rcu_read_lock();
+        current_task = pid_task(find_vpid(fpga.pid), PIDTYPE_PID);
+        rcu_read_unlock();
+    }
+    ret = send_sig_info(SIGUSR1, &info, current_task);
+    if (ret < 0) 
+    {
+        printk(KERN_ALERT"Failed to send a signal");
+        BUG_ON(1);
+    }
 }
 
 // TODO: reuse existing atmel ebi interfaces and data from dtb
@@ -567,43 +714,66 @@ int sk_fpga_setup_dma (struct platform_device *pdev)
     struct device *dev = &pdev->dev;
     int err = 0;
 
-    // let's do DMA stuff
     dma_cap_mask_t mask;
     dma_cap_zero(mask);
     dma_cap_set(DMA_SLAVE, mask);
     
-    dmaengine_get();
-
-    fpga.fpga_dma_chan_tx = dma_request_slave_channel_reason(dev, "tx");
-    if (IS_ERR(fpga.fpga_dma_chan_tx)) 
+    fpga.fpga_dma_chan = dma_request_slave_channel_reason(dev, "tx - rx");
+    if (IS_ERR(fpga.fpga_dma_chan)) 
     {
-        err = PTR_ERR(fpga.fpga_dma_chan_tx);
+        err = PTR_ERR(fpga.fpga_dma_chan);
         if (err == -EPROBE_DEFER) 
         {
             dev_warn(dev, "no DMA channel available at the moment\n");
-            goto release_tx_chan;
+            goto release_chan;
         }
-        dev_err(dev, "DMA TX channel not available, SPI unable to use DMA\n");
+        dev_err(dev, "DMA TX - RX channel not available, SPI unable to use DMA\n");
         err = -EBUSY;
-        goto release_tx_chan;
+        goto release_chan;
     }
 
-    fpga.fpga_dma_chan_rx = dma_request_slave_channel(dev, "rx");
-    if (IS_ERR(fpga.fpga_dma_chan_rx))
+    slave_config.dst_addr_width = DMA_SLAVE_BUSWIDTH_2_BYTES;
+    slave_config.src_addr_width = DMA_SLAVE_BUSWIDTH_2_BYTES;
+    slave_config.dst_addr = 0;
+    slave_config.src_addr = 0;
+    slave_config.src_maxburst = 1;
+    slave_config.dst_maxburst = 1;
+    slave_config.device_fc = false;
+
+    slave_config.direction = DMA_DEV_TO_MEM;
+    if (dmaengine_slave_config(fpga.fpga_dma_chan, &slave_config)) 
     {
-        err = PTR_ERR(fpga.fpga_dma_chan_rx);
-        if (err == -EPROBE_DEFER) 
-        {
-            dev_warn(dev, "no DMA channel available at the moment\n");
-            err = -EBUSY;
-            goto release_rx_chan;
-        }
-        dev_err(dev, "DMA RX channel not available, SPI unable to use DMA\n");
-        err = -EBUSY;
-        goto release_rx_chan;
+        dev_err(&pdev->dev, "failed to configure dma channel\n");
+        err = -EINVAL;
+        goto release_chan;
     }
 
-    //err = atmel_spi_dma_slave_config(as, &slaive_config, 8);
+    // allocate buffers
+    fpga.dma_buf = dma_alloc_coherent(&pdev->dev, DMA_BUF_SIZE, &fpga.dma_addr_buf, GFP_KERNEL | GFP_DMA);
+    if (!fpga.dma_buf) 
+    {
+        dma_free_coherent(&pdev->dev, DMA_BUF_SIZE, fpga.dma_buf, fpga.dma_addr_buf);
+        err = -ENOMEM;
+        goto release_chan;
+    }
+    
+    return err;
+
+release_chan:
+    if (!IS_ERR(fpga.fpga_dma_chan))
+    {
+        dma_release_channel(fpga.fpga_dma_chan);
+    }
+    fpga.fpga_dma_chan = NULL;
+    return err;
+}
+
+int sk_fpga_dma_config_slave ()
+{
+    int err = 0;
+    struct dma_slave_config	slave_config;
+    struct device *dev = &fpga.pdev->dev;
+    
     slave_config.dst_addr_width = DMA_SLAVE_BUSWIDTH_2_BYTES;
     slave_config.src_addr_width = DMA_SLAVE_BUSWIDTH_2_BYTES;
 
@@ -613,59 +783,12 @@ int sk_fpga_setup_dma (struct platform_device *pdev)
     slave_config.dst_maxburst = 1;
     slave_config.device_fc = false;
 
-    slave_config.direction = DMA_MEM_TO_DEV;
-    if (dmaengine_slave_config(fpga.fpga_dma_chan_tx, &slave_config)) 
-    {
-        dev_err(&pdev->dev, "failed to configure tx dma channel\n");
-        err = -EINVAL;
-        goto release_rx_chan;
-    }
-
     slave_config.direction = DMA_DEV_TO_MEM;
-    if (dmaengine_slave_config(fpga.fpga_dma_chan_rx, &slave_config)) 
+    if (dmaengine_slave_config(fpga.fpga_dma_chan, &slave_config)) 
     {
-        dev_err(&pdev->dev, "failed to configure rx dma channel\n");
+        dev_err(dev, "failed to configure tx - rx dma channel\n");
         err = -EINVAL;
-        goto release_rx_chan;
     }
-
-    dev_info(&pdev->dev,
-             "Using %s (tx) and %s (rx) for DMA transfers\n",
-             dma_chan_name(fpga.fpga_dma_chan_tx),
-             dma_chan_name(fpga.fpga_dma_chan_rx));
-
-    // allocate buffers
-
-    fpga.addr_tx_bbuf = dma_alloc_coherent(&pdev->dev, 65535, &fpga.dma_addr_tx_bbuf, GFP_KERNEL | GFP_DMA);
-    if (!fpga.addr_tx_bbuf) 
-    {
-        dma_free_coherent(&pdev->dev, 65535, fpga.addr_rx_bbuf, fpga.dma_addr_rx_bbuf);
-        err = -ENOMEM;
-        goto release_rx_chan;
-    }
-    
-    fpga.addr_rx_bbuf = dma_alloc_coherent(&pdev->dev, 65535, &fpga.dma_addr_rx_bbuf, GFP_KERNEL | GFP_DMA);
-    if (!fpga.addr_rx_bbuf) 
-    {
-        dma_free_coherent(&pdev->dev, 65535, fpga.addr_rx_bbuf, fpga.dma_addr_rx_bbuf);
-        err = -ENOMEM;
-        goto release_rx_chan;
-    }
-
-    return err;
-
-release_rx_chan:
-    if (!IS_ERR(fpga.fpga_dma_chan_rx))
-    {
-        dma_release_channel(fpga.fpga_dma_chan_rx);
-    }
-release_tx_chan:
-    if (!IS_ERR(fpga.fpga_dma_chan_tx))
-    {
-        dma_release_channel(fpga.fpga_dma_chan_tx);
-    }
-    fpga.fpga_dma_chan_tx = fpga.fpga_dma_chan_rx = NULL;
-    dmaengine_put();
     return err;
 }
 
@@ -681,11 +804,8 @@ static int sk_fpga_remove (struct platform_device *pdev)
     gpio_free(fpga.fpga_pins.fpga_reset);
     gpio_free(fpga.fpga_pins.fpga_irq);
     gpio_free(fpga.fpga_pins.host_irq);
-    dma_free_coherent(&pdev->dev, 65535, fpga.addr_rx_bbuf, fpga.dma_addr_rx_bbuf);
-    dma_free_coherent(&pdev->dev, 65535, fpga.addr_tx_bbuf, fpga.dma_addr_tx_bbuf);
-    dma_release_channel(fpga.fpga_dma_chan_rx);
-    dma_release_channel(fpga.fpga_dma_chan_tx);
-    dmaengine_put();
+    dma_free_coherent(&pdev->dev, DMA_BUF_SIZE, fpga.dma_buf, fpga.dma_addr_buf);
+    dma_release_channel(fpga.fpga_dma_chan);
     return 0;
 }
 
@@ -843,11 +963,36 @@ static int sk_fpga_mmap (struct file *file, struct vm_area_struct * vma)
     //NOTE: we should really protect these by mutexes and stuff...
     // Ignoring pgoff to determine start of mmap
     int ret = 0;
-    unsigned long start = (fpga.fpga_addr_sel == FPGA_ADDR_CS0) ? (fpga.fpga_mem_phys_start_cs0 >> PAGE_SHIFT) : (fpga.fpga_mem_phys_start_cs1 >> PAGE_SHIFT);
+    unsigned long start = 0;
+    unsigned long len   = 0;
+    switch (fpga.fpga_addr_sel)
+    {
+    case FPGA_ADDR_CS0:
+        start = (fpga.fpga_mem_phys_start_cs0 >> PAGE_SHIFT);
+        break;
+    case FPGA_ADDR_CS1:
+        start = (fpga.fpga_mem_phys_start_cs1 >> PAGE_SHIFT);
+        break;
+    case FPGA_ADDR_DMA:
+        BUG_ON(fpga.dma_addr_buf & (PAGE_SIZE - 1));
+        start = (fpga.dma_addr_buf >> PAGE_SHIFT);
+        break;
+    default:
+        printk(KERN_ALERT"Wrong address space selector");
+        BUG_ON(1);
+        break;
+    }
     // (vm_end - vm_start) should be equal to window size
-    unsigned long len   = (vma->vm_end - vma->vm_start);
+    len = (vma->vm_end - vma->vm_start);
     BUG_ON(vma->vm_pgoff);
-    BUG_ON(fpga.fpga_mem_window_size != (vma->vm_end - vma->vm_start));
+    if (fpga.fpga_addr_sel == FPGA_ADDR_DMA)
+    {
+        BUG_ON(DMA_BUF_SIZE != (vma->vm_end - vma->vm_start));
+    }
+    else
+    {
+        BUG_ON(fpga.fpga_mem_window_size != (vma->vm_end - vma->vm_start));
+    }
 
     // mark these pages as IO
     vma->vm_page_prot = vm_get_page_prot(vma->vm_flags | VM_IO);

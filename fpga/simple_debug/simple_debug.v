@@ -42,8 +42,8 @@ module simple_debug(
    assign leds_o[3] = irq_i;
    assign leds_o[4] = stored_data[0];
 
-   reg cs1 = 0;
-   assign irq_o = cs1;
+   reg irq = 0;
+   assign irq_o = irq;
 
    // iobuf instance
    genvar y;
@@ -65,6 +65,7 @@ module simple_debug(
    parameter RAM_SIZE_LOG2 = 5;
    // x2 since we're addressing by 16 bits
    wire ram_accessed = (({cs_i[0], addr_i} >= RAM_ADDRESS_START) && ({cs_i[0], addr_i} < (RAM_ADDRESS_START + RAM_SIZE*2))) ? 1 : 0;
+	wire clear_irq = ({cs_i[0], addr_i} == 25'h0);
 
    wire [DATA_WIDTH - 1:0] ram_d;
    // TODO: use proper log2()
@@ -93,10 +94,14 @@ module simple_debug(
          stage_2 <= 0;
          stage_1 <= 0;
          data_from_iface <= 0;
-         cs1 <= 0;
+         irq <= 0;
       end
       else
       begin
+			if (counter == 32'hFFFFFFFF)
+			begin
+				irq <= 1;
+			end
          counter <= counter + 1;
          // store chipselect stuff into flip-flops
          stage_3 <= stage_2;
@@ -107,7 +112,6 @@ module simple_debug(
             // put data from fpga
             if (!read_i)
             begin
-               cs1 <= read_i;
                if (ram_accessed)
                begin
                   data_from_iface <= ram_d;
@@ -123,8 +127,15 @@ module simple_debug(
             begin
                if (!ram_accessed)
                begin
-                  // skip LSB due to 16 bit data transactions
-                  stored_data <= data_to_iface;
+						if (clear_irq)
+						begin
+							irq <= data_to_iface[0];
+						end
+						else
+						begin
+	                  // skip LSB due to 16 bit data transactions
+	                  stored_data <= data_to_iface;
+						end
                end
             end
          end
